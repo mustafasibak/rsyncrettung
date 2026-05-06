@@ -33,6 +33,11 @@ struct ContentView: View {
     
     @State private var spaceCheckMessage: String = ""
 
+    // Calling this closure cancels the DispatchSource and closes the fd.
+    // Storing a closure (instead of the source directly) sidesteps
+    // Swift's existential-type restrictions on protocol-typed @State vars.
+    @State private var stopWatcher: (() -> Void)?
+
     @State private var showAdvancedSettings = false
     @State private var mirrorMode = false
     @State private var includeTrash = false
@@ -182,6 +187,13 @@ struct ContentView: View {
             if let u = bundledScriptURL() {
                 print("DEBUG script path:", u.path)
             }
+
+            startVolumeWatcher()
+        }
+        .onDisappear {
+            // Tear down the watcher when the view leaves the screen
+            // so we don't hold onto the fd or the kernel event source.
+            stopVolumeWatcher()
         }
         
         Button("Advanced Settings") {
@@ -201,6 +213,59 @@ struct ContentView: View {
             }
         }
 
+    }
+
+    func startVolumeWatcher() {
+        // O_EVTONLY opens the directory for event observation only —
+        // we don't need to read its contents through this fd.
+        let fd = open("/Volumes", O_EVTONLY)
+        guard fd >= 0 else { return }
+
+        // makeFileSystemObjectSource registers a kernel kqueue event on fd.
+        // The .write mask fires when directory entries change, which is
+        // exactly what happens when a volume is mounted or ejected.
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd,
+            eventMask: .write,
+            queue: .global(qos: .utility)   // run handler on a background thread
+        )
+
+        source.setEventHandler {
+            // Re-scan /Volumes, then update UI state on the main thread.
+            let updated = detectDrives()
+            DispatchQueue.main.async {
+                drives = updated
+
+                // If the selected drive was ejected, fall back gracefully
+                // instead of keeping a stale name in the picker.
+                if !updated.contains(selectedDrive) {
+                    selectedDrive = updated.first ?? ""
+                }
+            }
+        }
+
+        // The cancel handler is guaranteed to run after the last event handler
+        // fires, so closing the fd here is safe — no race condition.
+        source.setCancelHandler {
+            close(fd)
+        }
+
+        // resume() activates the source. DispatchSources start suspended;
+        // nothing fires until this call.
+        source.resume()
+
+        // Capture `source` strongly in the closure so ARC keeps it alive
+        // for as long as stopWatcher exists. Setting stopWatcher = nil
+        // drops the closure, drops the source, and ARC deallocates it.
+        stopWatcher = { source.cancel() }
+    }
+
+    func stopVolumeWatcher() {
+        // Calling the closure runs source.cancel(), which:
+        //   1. stops new events from firing
+        //   2. runs the cancel handler (closes the fd)
+        stopWatcher?()
+        stopWatcher = nil
     }
 
     func detectDrives() -> [String] {
