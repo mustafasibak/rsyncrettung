@@ -6,8 +6,13 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		0AD192AE2F55E26F00BE01E1 /* rsync_swift.zsh in Resources */ = {isa = PBXBuildFile; fileRef = 0AD192AD2F55E26F00BE01E1 /* rsync_swift.zsh */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		0AD1929E2F55E02200BE01E1 /* RsyncRettung.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RsyncRettung.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		0AD192AD2F55E26F00BE01E1 /* rsync_swift.zsh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = rsync_swift.zsh; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -32,6 +37,7 @@
 		0AD192952F55E02200BE01E1 = {
 			isa = PBXGroup;
 			children = (
+				0AD192AC2F55E23800BE01E1 /* SCRIPTS */,
 				0AD192A02F55E02200BE01E1 /* RsyncRettung */,
 				0AD1929F2F55E02200BE01E1 /* Products */,
 			);
@@ -43,6 +49,14 @@
 				0AD1929E2F55E02200BE01E1 /* RsyncRettung.app */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		0AD192AC2F55E23800BE01E1 /* SCRIPTS */ = {
+			isa = PBXGroup;
+			children = (
+				0AD192AD2F55E26F00BE01E1 /* rsync_swift.zsh */,
+			);
+			path = SCRIPTS;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -109,6 +123,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				0AD192AE2F55E26F00BE01E1 /* rsync_swift.zsh in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -251,9 +266,8 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				ENABLE_APP_SANDBOX = YES;
+				ENABLE_APP_SANDBOX = NO;
 				ENABLE_PREVIEWS = YES;
-				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -281,9 +295,8 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				ENABLE_APP_SANDBOX = YES;
+				ENABLE_APP_SANDBOX = NO;
 				ENABLE_PREVIEWS = YES;
-				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
