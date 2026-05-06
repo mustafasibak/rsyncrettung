@@ -267,6 +267,9 @@ struct ContentView: View {
         copiedKB = currentTargetKB
         lastCopiedKB = currentTargetKB
         
+        let sourceKB = Int64(duKB(NSHomeDirectory()))
+        totalKB = max(1, sourceKB)
+
         let freeKB = freeSpaceKB(at: drivePath)
 
         if freeKB < totalKB {
