@@ -32,6 +32,8 @@ struct ContentView: View {
     @State private var speedKBps: Double = 0
     
     @State private var spaceCheckMessage: String = ""
+    @State private var pendingLogEntries: [LogEntry] = []
+    @State private var logFlushTimer: Timer?
 
     // Calling this closure cancels the DispatchSource and closes the fd.
     // Storing a closure (instead of the source directly) sidesteps
@@ -125,25 +127,36 @@ struct ContentView: View {
             .background(Color.gray.opacity(0.1))
             .cornerRadius(8)
 
-            HStack(spacing: 10) {
-                ProgressView(value: progress)
-                    .frame(maxWidth: 260)
+            if dryRunMode && isRunning {
+                HStack(spacing: 10) {
+                    ProgressView()
+                        .progressViewStyle(.linear)
+                        .frame(maxWidth: 260)
+                    Text("Scanning…")
+                        .font(.system(.footnote, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+            } else {
+                HStack(spacing: 10) {
+                    ProgressView(value: progress)
+                        .frame(maxWidth: 260)
 
-                Text("\(Int(progress * 100))%")
+                    Text("\(Int(progress * 100))%")
+                        .font(.system(.footnote, design: .monospaced))
+
+                    Text("Speed: \(speedString(fromKBps: speedKBps))")
+                        .font(.system(.footnote, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+
+                Text("\(gibString(fromKB: copiedKB)) / \(gibString(fromKB: totalKB))")
                     .font(.system(.footnote, design: .monospaced))
-                
-                Text("Speed: \(speedString(fromKBps: speedKBps))")
+                    .foregroundStyle(.secondary)
+
+                Text(etaString)
                     .font(.system(.footnote, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
-
-            Text("\(gibString(fromKB: copiedKB)) / \(gibString(fromKB: totalKB))")
-                .font(.system(.footnote, design: .monospaced))
-                .foregroundStyle(.secondary)
-            
-            Text(etaString)
-                .font(.system(.footnote, design: .monospaced))
-                .foregroundStyle(.secondary)
 
             HStack {
                 Spacer()
@@ -432,7 +445,9 @@ struct ContentView: View {
             appendLog("Disk space OK.", type: .success)
         }
 
-        if mirrorMode {
+        if dryRunMode {
+            proceedWithBackup()
+        } else if mirrorMode {
             showMirrorWarning = true
         } else {
             showCloudWarning = true
@@ -474,22 +489,28 @@ struct ContentView: View {
 
         pipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            if let output = String(data: data, encoding: .utf8), !output.isEmpty {
-                DispatchQueue.main.async {
-                    for line in output.split(separator: "\n", omittingEmptySubsequences: false) {
-                        let text = String(line).trimmingCharacters(in: .newlines)
-                        if !text.isEmpty {
-                            self.appendLog(text)
-                        }
-                    }
-                    self.handleScriptOutput(output)
-                }
+            guard let output = String(data: data, encoding: .utf8), !output.isEmpty else { return }
+            let newEntries = output.split(separator: "\n", omittingEmptySubsequences: true)
+                .map { String($0).trimmingCharacters(in: .newlines) }
+                .filter { !$0.isEmpty }
+                .map { LogEntry(message: $0, type: .info) }
+            DispatchQueue.main.async {
+                self.pendingLogEntries.append(contentsOf: newEntries)
+                self.handleScriptOutput(output)
             }
         }
 
         do {
             try process.run()
             isRunning = true
+            logFlushTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { _ in
+                guard !self.pendingLogEntries.isEmpty else { return }
+                self.logEntries.append(contentsOf: self.pendingLogEntries)
+                if self.logEntries.count > 500 {
+                    self.logEntries.removeFirst(self.logEntries.count - 500)
+                }
+                self.pendingLogEntries.removeAll()
+            }
             if dryRunMode {
                 appendLog("DRY RUN: No files will be copied. Showing what would be transferred.", type: .warning)
             } else {
@@ -503,6 +524,15 @@ struct ContentView: View {
             DispatchQueue.main.async {
                 isRunning = false
                 stopProgressTimer()
+                self.logFlushTimer?.invalidate()
+                self.logFlushTimer = nil
+                if !self.pendingLogEntries.isEmpty {
+                    self.logEntries.append(contentsOf: self.pendingLogEntries)
+                    if self.logEntries.count > 500 {
+                        self.logEntries.removeFirst(self.logEntries.count - 500)
+                    }
+                    self.pendingLogEntries.removeAll()
+                }
 
                 if userCancelled {
                     appendLog("Backup cancelled by user.", type: .warning)
