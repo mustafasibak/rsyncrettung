@@ -34,6 +34,7 @@ struct ContentView: View {
     @State private var spaceCheckMessage: String = ""
     @State private var pendingLogEntries: [LogEntry] = []
     @State private var logFlushTimer: Timer?
+    @State private var dryRunStats: [String] = []
 
     // Calling this closure cancels the DispatchSource and closes the fd.
     // Storing a closure (instead of the source directly) sidesteps
@@ -132,7 +133,7 @@ struct ContentView: View {
                     ProgressView()
                         .progressViewStyle(.linear)
                         .frame(maxWidth: 260)
-                    Text("Scanning…")
+                    Text("Dry run in progress — no files are being copied")
                         .font(.system(.footnote, design: .monospaced))
                         .foregroundStyle(.secondary)
                 }
@@ -413,6 +414,7 @@ struct ContentView: View {
         speedKBps = 0
         targetPath = ""
         skippedFiles = []
+        dryRunStats = []
         stopProgressTimer()
         
         appendLog("Checking target drive...")
@@ -538,6 +540,13 @@ struct ContentView: View {
                     appendLog("Backup cancelled by user.", type: .warning)
                 } else if proc.terminationStatus == 0 {
                     if dryRunMode {
+                        if !dryRunStats.isEmpty {
+                            appendLog("──────── Dry Run Summary ────────", type: .info)
+                            for stat in dryRunStats {
+                                appendLog(stat, type: .success)
+                            }
+                            appendLog("─────────────────────────────────", type: .info)
+                        }
                         appendLog("Dry run complete. No files were copied.", type: .info)
                     } else {
                         appendLog("Backup completed successfully.", type: .success)
@@ -574,6 +583,17 @@ struct ContentView: View {
 
             if line.hasPrefix("TARGET=") {
                 targetPath = line.replacingOccurrences(of: "TARGET=", with: "")
+            }
+
+            if dryRunMode {
+                let isStat = line.hasPrefix("Number of") ||
+                             line.hasPrefix("Total file size") ||
+                             line.hasPrefix("Total transferred file size") ||
+                             (line.hasPrefix("sent ") && line.contains("bytes")) ||
+                             (line.contains("total size is") && line.contains("(DRY RUN)"))
+                if isStat {
+                    dryRunStats.append(line)
+                }
             }
         }
     }
