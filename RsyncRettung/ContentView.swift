@@ -38,9 +38,16 @@ struct ContentView: View {
     // Swift's existential-type restrictions on protocol-typed @State vars.
     @State private var stopWatcher: (() -> Void)?
 
+    @State private var showCloudWarning = false
+    @State private var cloudWarningAcknowledged = false
     @State private var showAdvancedSettings = false
     @State private var mirrorMode = false
     @State private var includeTrash = false
+    @State private var dryRunMode = false
+
+    @State private var showMirrorWarning = false
+    @State private var mirrorWarningConfirmed = false
+    @State private var mirrorWarningAcknowledged = false
     
     
     
@@ -138,10 +145,53 @@ struct ContentView: View {
                 .font(.system(.footnote, design: .monospaced))
                 .foregroundStyle(.secondary)
 
+            HStack {
+                Spacer()
+                Button("Advanced Settings") {
+                    showAdvancedSettings = true
+                }
+            }
+
         }
-        .padding(16)
-        .frame(width: 720, height: 520)
-        
+        .padding(20)
+        .frame(width: 640, height: 660)
+
+        // CLOUD WARNING Pop Up
+        .sheet(isPresented: $showCloudWarning, onDismiss: { cloudWarningAcknowledged = false }) {
+            VStack(alignment: .leading, spacing: 20) {
+
+                Text("Before you start")
+                    .font(.title2)
+                    .fontWeight(.semibold)
+
+                Text("Data synced with cloud services can cause inaccuracies in the backup process. Please make sure you are logged out of all cloud services before proceeding (e.g. iCloud, Nextcloud, Adobe Creative Cloud)")
+                    .fixedSize(horizontal: false, vertical: true)
+                    .foregroundColor(.secondary)
+
+                Toggle(isOn: $cloudWarningAcknowledged) {
+                    Text("I have logged myself out of all cloud services")
+                }
+                .toggleStyle(.checkbox)
+
+                Spacer()
+
+                HStack {
+                    Button("Cancel") {
+                        showCloudWarning = false
+                    }
+                    Spacer()
+                    Button("Start Backup") {
+                        showCloudWarning = false
+                        proceedWithBackup()
+                    }
+                    .disabled(!cloudWarningAcknowledged)
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+            .padding(24)
+            .frame(width: 420, height: 240)
+        }
+
         // ADVANCED SHEET
         .sheet(isPresented: $showAdvancedSettings) {
             VStack(alignment: .leading, spacing: 20) {
@@ -167,17 +217,67 @@ struct ContentView: View {
                     }
                 }
 
+                Toggle(isOn: $dryRunMode) {
+                    VStack(alignment: .leading) {
+                        Text("Dry Run (--dry-run)")
+                        Text("Preview what would be transferred without copying any files")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+
                 Spacer()
 
                 Button("Close") {
                     showAdvancedSettings = false
                 }
             }
-            .padding()
-            .frame(width: 400, height: 200)
+            .padding(24)
+            .frame(width: 400, height: 320)
         }
         
-        
+        // MIRROR WARNING Pop Up
+        .sheet(isPresented: $showMirrorWarning, onDismiss: {
+            if mirrorWarningConfirmed {
+                mirrorWarningConfirmed = false
+                mirrorWarningAcknowledged = false
+                showCloudWarning = true
+            }
+        }) {
+            VStack(alignment: .leading, spacing: 20) {
+
+                Text("Mirror Mode is Enabled")
+                    .font(.title2)
+                    .fontWeight(.semibold)
+
+                Text("Mirror mode will delete files on the backup drive that no longer exist on this Mac. This cannot be undone. Make sure you intentionally enabled this option before continuing.")
+                    .fixedSize(horizontal: false, vertical: true)
+                    .foregroundColor(.secondary)
+
+                Toggle(isOn: $mirrorWarningAcknowledged) {
+                    Text("I understand that files may be permanently deleted from the backup drive")
+                }
+                .toggleStyle(.checkbox)
+
+                Spacer()
+
+                HStack {
+                    Button("Cancel") {
+                        showMirrorWarning = false
+                    }
+                    Spacer()
+                    Button("Continue") {
+                        mirrorWarningConfirmed = true
+                        showMirrorWarning = false
+                    }
+                    .disabled(!mirrorWarningAcknowledged)
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+            .padding(24)
+            .frame(width: 420, height: 260)
+        }
+
         .onAppear {
             drives = detectDrives()
             if selectedDrive.isEmpty, let first = drives.first {
@@ -191,26 +291,7 @@ struct ContentView: View {
             startVolumeWatcher()
         }
         .onDisappear {
-            // Tear down the watcher when the view leaves the screen
-            // so we don't hold onto the fd or the kernel event source.
             stopVolumeWatcher()
-        }
-        
-        Button("Advanced Settings") {
-            showAdvancedSettings = true
-        }
-        .padding(.top, 8)
-        .frame(maxWidth: .infinity, alignment: .bottomTrailing)
-        
-        VStack {
-            Spacer()
-            HStack {
-                Spacer()
-                Button("TEST BUTTON"){
-                    
-                }
-            
-            }
         }
 
     }
@@ -309,7 +390,7 @@ struct ContentView: View {
     }
     
     func startBackup() {
-        guard let scriptURL = bundledScriptURL() else {
+        guard bundledScriptURL() != nil else {
             appendLog("Script not found.", type: .error)
             return
         }
@@ -338,13 +419,28 @@ struct ContentView: View {
         let freeKB = freeSpaceKB(at: drivePath)
 
         if freeKB < totalKB {
-            spaceCheckMessage = "Not enough space on \(selectedDrive). Free: \(gibString(fromKB: freeKB))"
-            appendLog("Backup aborted: insufficient disk space.", type: .error)
-            return
+            if dryRunMode {
+                spaceCheckMessage = "Insufficient space for actual backup on \(selectedDrive). Free: \(gibString(fromKB: freeKB)) — simulating in dry run"
+                appendLog("Note: Insufficient disk space for actual backup. Proceeding as dry run only.", type: .warning)
+            } else {
+                spaceCheckMessage = "Not enough space on \(selectedDrive). Free: \(gibString(fromKB: freeKB))"
+                appendLog("Backup aborted: insufficient disk space.", type: .error)
+                return
+            }
         } else {
             spaceCheckMessage = "Space check OK ✓  Available on \(selectedDrive): \(gibString(fromKB: freeKB))"
-            appendLog("Disk space OK. Starting backup...", type: .success)
+            appendLog("Disk space OK.", type: .success)
         }
+
+        if mirrorMode {
+            showMirrorWarning = true
+        } else {
+            showCloudWarning = true
+        }
+    }
+
+    func proceedWithBackup() {
+        guard let scriptURL = bundledScriptURL() else { return }
 
         appendLog("Backup process started (rsync)...", type: .success)
         let process = Process()
@@ -362,6 +458,10 @@ struct ContentView: View {
 
         if includeTrash {
             args.append("--include-trash")
+        }
+
+        if dryRunMode {
+            args.append("--dry-run")
         }
 
         process.arguments = args
@@ -390,7 +490,11 @@ struct ContentView: View {
         do {
             try process.run()
             isRunning = true
-            startProgressTimer()
+            if dryRunMode {
+                appendLog("DRY RUN: No files will be copied. Showing what would be transferred.", type: .warning)
+            } else {
+                startProgressTimer()
+            }
         } catch {
             appendLog("Failed to start backup.\n", type: .error)
         }
@@ -403,7 +507,11 @@ struct ContentView: View {
                 if userCancelled {
                     appendLog("Backup cancelled by user.", type: .warning)
                 } else if proc.terminationStatus == 0 {
-                    appendLog("Backup completed successfully.", type: .success)
+                    if dryRunMode {
+                        appendLog("Dry run complete. No files were copied.", type: .info)
+                    } else {
+                        appendLog("Backup completed successfully.", type: .success)
+                    }
                 } else if proc.terminationStatus == 23 {
                     let skipped = loadSkippedFiles(from: targetPath)
                     skippedFiles = skipped

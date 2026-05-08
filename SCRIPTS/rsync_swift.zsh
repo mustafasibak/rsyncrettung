@@ -11,6 +11,7 @@
 ########################################################
 DELETE_FLAG=""
 INCLUDE_TRASH=false
+DRY_RUN_FLAG=""
 
 
 USER_FOLDER="/Users/$(whoami)"
@@ -28,6 +29,9 @@ for arg in "$@"; do
       ;;
     --include-trash)
       INCLUDE_TRASH=true
+      ;;
+    --dry-run)
+      DRY_RUN_FLAG="--dry-run"
       ;;
   esac
 done
@@ -99,6 +103,7 @@ echo "TARGET=$TARGET" >&2
 echo "📦 Backing up $USER_FOLDER to $TARGET ..."
 
 rsync -av --partial --human-readable \
+    ${DRY_RUN_FLAG:+$DRY_RUN_FLAG} \
     ${DELETE_FLAG:+$DELETE_FLAG} \
     ${TRASH_EXCLUDE:+$TRASH_EXCLUDE} \
     --exclude "*.app" \
@@ -144,7 +149,6 @@ rsync -av --partial --human-readable \
     --exclude "Library/Group Containers/group.com.apple.*" \
     --exclude "Library/Group Containers/com.apple.*" \
     --exclude "Nextcloud*" \
-    --exclude "iCloud Drive*" \
     "$USER_FOLDER/" "$TARGET/" 2> "$TARGET/rsync_errors.log"
     # --exclude ".Trash*"
 
