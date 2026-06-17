@@ -7,10 +7,12 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0A4CC0EE2FE17A6C008A5E3C /* rsync_restore.zsh in Resources */ = {isa = PBXBuildFile; fileRef = 0A4CC0ED2FE17A6C008A5E3C /* rsync_restore.zsh */; };
 		0AD192AE2F55E26F00BE01E1 /* rsync_swift.zsh in Resources */ = {isa = PBXBuildFile; fileRef = 0AD192AD2F55E26F00BE01E1 /* rsync_swift.zsh */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		0A4CC0ED2FE17A6C008A5E3C /* rsync_restore.zsh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = rsync_restore.zsh; sourceTree = "<group>"; };
 		0AD1929E2F55E02200BE01E1 /* RsyncRettung.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RsyncRettung.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		0AD192AD2F55E26F00BE01E1 /* rsync_swift.zsh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = rsync_swift.zsh; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -55,6 +57,7 @@
 			isa = PBXGroup;
 			children = (
 				0AD192AD2F55E26F00BE01E1 /* rsync_swift.zsh */,
+				0A4CC0ED2FE17A6C008A5E3C /* rsync_restore.zsh */,
 			);
 			path = SCRIPTS;
 			sourceTree = "<group>";
@@ -123,6 +126,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				0A4CC0EE2FE17A6C008A5E3C /* rsync_restore.zsh in Resources */,
 				0AD192AE2F55E26F00BE01E1 /* rsync_swift.zsh in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
