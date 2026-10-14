@@ -54,6 +54,7 @@ RSYNC_EXCLUDES=(
     "--exclude=Library/Application Support/CloudDocs"
     "--exclude=Library/Group Containers/NKUJUXUJ3B.com.nextcloud.desktopclient"
     "--exclude=/Nextcloud*"
+    "--exclude=/Creative Cloud Files*"
 
     # --- Browser & Chat-Apps (Chrome, Teams, Webex, Asana usw.): Session files /
     # zwischendateien, die sich dauernd ändern solange die App läuft und beim
@@ -218,17 +219,32 @@ if [[ -z "$DRY_RUN_FLAG" ]]; then
     echo "XFER_LIST=$SCAN_LIST" >&2
 fi
 
-rsync -av --no-specials --partial --ignore-errors --human-readable --modify-window=2 \
+ERROR_LOG="$HOME/Desktop/RsyncRettung_restore_errors.log"
+# --timeout / --whole-file: siehe rsync_swift.zsh
+rsync -av --no-specials --partial --ignore-errors --whole-file --timeout=300 --human-readable --modify-window=2 \
     ${DRY_RUN_FLAG:+$DRY_RUN_FLAG} \
     ${DRY_RUN_FLAG:+--stats} \
     ${DELETE_FLAG:+$DELETE_FLAG} \
     "${RSYNC_EXCLUDES[@]}" \
-    "$BACKUP_FOLDER/" "$TARGET_FOLDER/" 2>"$HOME/Desktop/RsyncRettung_restore_errors.log" &
+    "$BACKUP_FOLDER/" "$TARGET_FOLDER/" 2>"$ERROR_LOG" &
 
 RSYNC_PID=$!
 # Swift's Cancel sends SIGTERM to this zsh only — forward it, otherwise rsync
 # keeps restoring (or deleting, in mirror mode) as an orphan.
 trap 'kill -TERM "$RSYNC_PID" 2>/dev/null; wait "$RSYNC_PID"; exit 20' TERM INT
+# Bei --timeout meldet rsync den Stillstand ("poll: timeout"), wartet danach
+# aber evtl. ewig auf den hängenden Gegenprozess — deshalb hier selbst beenden.
+while kill -0 "$RSYNC_PID" 2>/dev/null; do
+    if grep -q 'poll: timeout' "$ERROR_LOG" 2>/dev/null; then
+        trap - TERM INT
+        pkill -KILL -P "$RSYNC_PID" 2>/dev/null
+        kill -KILL "$RSYNC_PID" 2>/dev/null
+        wait "$RSYNC_PID" 2>/dev/null
+        echo "⏱ No data moved for 300 s, stopped."
+        exit 30
+    fi
+    sleep 1
+done
 wait "$RSYNC_PID"
 RSYNC_EXIT=$?
 trap - TERM INT

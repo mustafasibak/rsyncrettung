@@ -53,6 +53,7 @@ RSYNC_EXCLUDES+=(
     "--exclude=Library/Application Support/CloudDocs"
     "--exclude=Library/Group Containers/NKUJUXUJ3B.com.nextcloud.desktopclient"
     "--exclude=/Nextcloud*"
+    "--exclude=/Creative Cloud Files*"
 
     # --- Browser & Chat-Apps (Chrome, Teams, Webex, Asana usw.): Session files /
     # zwischendateien, die sich dauernd ändern solange die App läuft und beim nächsten Start sowieso neu angelegt werden ---
@@ -161,7 +162,7 @@ echo "RUNNING_AS=$(whoami)" >&2
 echo "PWD=$(pwd)" >&2
 
 # The du estimate so Swift has a fallback for the space check before the accurate scan completesss
-RAW_SOURCE_KB=$(du -sk "$USER_FOLDER" 2>/tmp/du_debug.txt | awk 'NR==1{print $1}')
+RAW_SOURCE_KB=$(du -sk "$USER_FOLDER" 2>/dev/null | awk 'NR==1{print $1}')
 [[ "$RAW_SOURCE_KB" =~ '^[0-9]+$' ]] || RAW_SOURCE_KB=0
 echo "RAW_SOURCE_KB=$RAW_SOURCE_KB" >&2
 
@@ -217,10 +218,19 @@ fi
 # Rsync mit progress flags
 echo "📦 Backing up $USER_FOLDER to $TARGET ..."
 
-ERROR_LOG="${DRY_RUN_FLAG:+/tmp/rsync_dryrun_errors.log}"
-ERROR_LOG="${ERROR_LOG:-$TARGET/rsync_errors.log}"
+if [[ -n "$DRY_RUN_FLAG" ]]; then
+    ERROR_LOG=$(mktemp "${TMPDIR:-/tmp}/rsync_dryrun_errors.XXXXXX")
+else
+    ERROR_LOG="$TARGET/rsync_errors.log"
+fi
+echo "ERROR_LOG=$ERROR_LOG" >&2
 
-rsync -av --no-specials --partial --human-readable --modify-window=2 \
+# --timeout: bricht ab, wenn 300 s lang gar keine Daten fließen (z. B. eine
+# Cloud-Platzhalterdatei, deren Download hängt), statt ewig zu warten.
+# --whole-file: kein Delta-Abgleich großer geänderter Dateien — der würde sonst
+# lange ohne Datenfluss laufen und fälschlich den Timeout auslösen.
+
+rsync -av --no-specials --partial --whole-file --timeout=300 --human-readable --modify-window=2 \
     ${DRY_RUN_FLAG:+$DRY_RUN_FLAG} \
     ${DRY_RUN_FLAG:+--stats} \
     ${DELETE_FLAG:+$DELETE_FLAG} \
@@ -231,6 +241,19 @@ RSYNC_PID=$!
 # Swift's Cancel sends SIGTERM to this zsh only — forward it, otherwise rsync
 # keeps copying (or deleting, in mirror mode) as an orphan.
 trap 'kill -TERM "$RSYNC_PID" 2>/dev/null; wait "$RSYNC_PID"; exit 20' TERM INT
+# Bei --timeout meldet rsync den Stillstand ("poll: timeout"), wartet danach
+# aber evtl. ewig auf den hängenden Gegenprozess — deshalb hier selbst beenden.
+while kill -0 "$RSYNC_PID" 2>/dev/null; do
+    if grep -q 'poll: timeout' "$ERROR_LOG" 2>/dev/null; then
+        trap - TERM INT
+        pkill -KILL -P "$RSYNC_PID" 2>/dev/null
+        kill -KILL "$RSYNC_PID" 2>/dev/null
+        wait "$RSYNC_PID" 2>/dev/null
+        echo "⏱ No data moved for 300 s, stopped."
+        exit 30
+    fi
+    sleep 1
+done
 wait "$RSYNC_PID"
 RSYNC_EXIT=$?
 trap - TERM INT

@@ -110,6 +110,7 @@ struct ContentView: View {
     @State private var totalKB: Int64 = 1
     @State private var copiedKB: Int64 = 0
     @State private var targetPath: String = ""
+    @State private var backupErrorLogPath: String = ""
     @State private var progressTimer: Timer?
     @State private var userCancelled = false
     @State private var lastCopiedKB: Int64 = 0
@@ -419,13 +420,15 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 20) {
                 Text("Full Disk Access Not Detected")
                     .font(.title2).fontWeight(.semibold)
-                Text("RsyncRettung doesn't have Full Disk Access. Without it, macOS blocks access to Mail, Safari, Messages, Notes and other protected folders and skips them with no error. The run can still finish and look successful even though that data was never copied.\n\nOpen System Settings, grant Full Disk Access to RsyncRettung, then try again.")
+                Text("RsyncRettung doesn't have Full Disk Access. Without it, macOS blocks access to Mail, Safari, Messages, Notes and other protected folders and skips them with no error. The run can still finish and look successful even though that data was never copied.\n\nOn company Macs this permission is granted automatically by IT. Please contact IT support. A real backup or restore can't start until access is granted.")
                     .fixedSize(horizontal: false, vertical: true)
                     .foregroundColor(.secondary)
-                Toggle(isOn: $fdaWarningAcknowledged) {
-                    Text("I understand some data may not get copied")
+                if fdaPendingIsDryRun {
+                    Toggle(isOn: $fdaWarningAcknowledged) {
+                        Text("Run the dry run anyway (results will be incomplete)")
+                    }
+                    .toggleStyle(.checkbox)
                 }
-                .toggleStyle(.checkbox)
                 Spacer()
                 HStack {
                     Button("Open Privacy Settings") {
@@ -438,14 +441,16 @@ struct ContentView: View {
                         showFDAWarning = false
                         pendingFDAContinuation = nil
                     }
-                    Button("Continue Anyway") {
-                        showFDAWarning = false
-                        let proceed = pendingFDAContinuation
-                        pendingFDAContinuation = nil
-                        proceed?()
+                    if fdaPendingIsDryRun {
+                        Button("Continue Dry Run") {
+                            showFDAWarning = false
+                            let proceed = pendingFDAContinuation
+                            pendingFDAContinuation = nil
+                            proceed?()
+                        }
+                        .disabled(!fdaWarningAcknowledged)
+                        .buttonStyle(.borderedProminent)
                     }
-                    .disabled(!fdaWarningAcknowledged)
-                    .buttonStyle(.borderedProminent)
                 }
             }
             .padding(28)
@@ -936,6 +941,7 @@ struct ContentView: View {
         speedKBps = 0
         longSpeedKBps = 0
         targetPath = ""
+        backupErrorLogPath = ""
         skippedFiles = []
         dryRunStats = []
         backupPinnedLogCount = 0
@@ -1035,6 +1041,7 @@ struct ContentView: View {
                         !line.hasPrefix("XFER_KB=") &&
                         !line.hasPrefix("XFER_LIST=") &&
                         !line.hasPrefix("TARGET=") &&
+                        !line.hasPrefix("ERROR_LOG=") &&
                         line != "SCAN_START" &&
                         line != "SCAN_END" &&
                         !line.hasPrefix("RUNNING_AS=") &&
@@ -1099,7 +1106,7 @@ struct ContentView: View {
                             type: self.dryRunMode ? .info : .success
                         )
                     case 23, 24:
-                        let logFile = self.dryRunMode ? "/tmp/rsync_dryrun_errors.log" : "\(self.targetPath)/rsync_errors.log"
+                        let logFile = self.backupErrorLogPath.isEmpty ? "\(self.targetPath)/rsync_errors.log" : self.backupErrorLogPath
                         let skipped = self.loadSkippedFiles(logFile: logFile)
                         self.skippedFiles = skipped
                         if skipped.isEmpty {
@@ -1110,6 +1117,9 @@ struct ContentView: View {
                             self.appendLog(self.dryRunMode ? "Dry run complete with warnings." : "Backup completed with warnings.", type: .warning)
                             self.showSkippedFiles(skipped, limit: self.dryRunMode ? .max : 20, logPath: logFile)
                         }
+                    case 30:
+                        self.backupFinishState = .failed
+                        self.appendLog("Backup stopped: no data moved for 5 minutes. A file didn't respond, most often a cloud placeholder (iCloud, Creative Cloud) waiting for a download. Pause cloud sync or download the files, then start the backup again. It continues where it stopped.", type: .error)
                     default:
                         self.backupFinishState = .failed
                         self.appendLog("Backup failed (code: \(capturedExitStatus)).", type: .error)
@@ -1428,6 +1438,13 @@ struct ContentView: View {
                     // it — otherwise a code-12 exit is treated as a real failure,
                     // since it can also mean e.g. the drive was disconnected.
                     let codesWithPossibleSkips: Set<Int32> = [12, 16, 23, 24]
+                    if !isDryRun, capturedExitStatus != 0, capturedExitStatus != 30,
+                       self.restoreLogShowsEarlyStop(restoreLogPath) {
+                        self.restoreFinishState = .failed
+                        self.appendLog("Restore may have stopped early: rsync's copy process crashed partway through, so files after that point may be missing. Run the restore again, and check the error log if it happens again.", type: .error)
+                        self.appendLog("Error log: \(restoreLogPath)", type: .info)
+                        return
+                    }
                     switch capturedExitStatus {
                     case 0:
                         self.restoreFinishState = .success
@@ -1455,6 +1472,10 @@ struct ContentView: View {
                             }
                             self.showSkippedFiles(skipped, limit: isDryRun ? .max : 20, logPath: restoreLogPath)
                         }
+                    case 30:
+                        self.restoreFinishState = .failed
+                        self.appendLog("Restore stopped: no data moved for 5 minutes. A file didn't respond or the backup drive stalled. Check the drive connection, then start the restore again. It continues where it stopped.", type: .error)
+                        self.appendLog("Error log: \(restoreLogPath)", type: .info)
                     default:
                         self.restoreFinishState = .failed
                         self.appendLog("Restore failed (code: \(capturedExitStatus)).", type: .error)
@@ -1602,6 +1623,9 @@ struct ContentView: View {
             }
             if line.hasPrefix("TARGET=") {
                 targetPath = line.replacingOccurrences(of: "TARGET=", with: "")
+            }
+            if line.hasPrefix("ERROR_LOG=") {
+                backupErrorLogPath = String(line.dropFirst("ERROR_LOG=".count))
             }
             if isActiveDryRun {
                 let isStat = line.hasPrefix("Number of") ||
@@ -2023,6 +2047,10 @@ struct ContentView: View {
         return (try? FileManager.default.contentsOfDirectory(atPath: tccDir)) != nil
     }
 
+    var fdaPendingIsDryRun: Bool {
+        activeTab == .backup ? dryRunMode : restoreDryRunMode
+    }
+
     func checkFullDiskAccess(then proceed: @escaping () -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
             let granted = self.hasFullDiskAccess()
@@ -2059,6 +2087,14 @@ struct ContentView: View {
         let mins = Int((Double(total % 3600) / 60 / 5).rounded()) * 5
         if mins == 60 { return "~\(hours + 1) h" }
         return mins == 0 ? "~\(hours) h" : "~\(hours) h \(mins) min"
+    }
+
+    // A receiver crash mid-restore (seen after permission errors in an
+    // OS-managed container) silently drops every file after the crash point.
+    func restoreLogShowsEarlyStop(_ logFile: String) -> Bool {
+        guard let data = FileManager.default.contents(atPath: logFile) else { return false }
+        let text = String(decoding: data, as: UTF8.self).lowercased()
+        return text.contains("unexpected end of file")
     }
 
     func loadSkippedFiles(logFile: String) -> [String] {
