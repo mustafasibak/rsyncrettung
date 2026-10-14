@@ -108,7 +108,14 @@ Both scripts:
 - **`awk` locale bug fixed:** `SCAN_KB`/`XFER_KB` parsing now runs `LC_ALL=C awk`. Under a UTF-8 locale (e.g. a terminal with `LANG=de_DE.UTF-8`) BSD awk aborted with "towc: multibyte conversion failure" on openrsync's raw-byte filenames in the scan list, so `TOTAL_KB`/`XFER_KB` were silently never emitted and the app fell back to the old rough progress math. GUI launches usually have no `LANG`, so app runs were probably unaffected, but it was fragile.
 - **ETA averaging slowed to ~2 min:** ETA now uses `longSpeedKBps` alone, with EMA weights 0.985/0.015 per 2 s tick (decay 0.995 on zero-delta ticks); `speedKBps` is only the live speed readout. Measured by recording a real 86.6 GiB backup (home → `Mustafa-1208492`, 13 min, every output line + 2 s `du` samples) and replaying it through the app's exact math: old ~20 s average → median error 28 %, worst 336 %, ETA climbed 9 → 22 min during small-file stretches; new → median 12 %, 90 % within 26 %, worst 29 %, max rise +1 % per tick, steady countdown, slightly optimistic (−10…−25 %). Same constants applied to restore (not separately measured). One recording only; multi-hour runs not yet measured.
 
-## Shipped 2026-08-12 → 2026-09-22 (committed 2026-10-14 as `4899f49`)
+- **Restore onto a Mac in use:** real restores now always measure the home folder (`du`, off main). Above `restoreInUseThresholdKB` (5 GB) a red-tinted sheet (`showRestoreInUseWarning`) explains that newer files on this Mac get overwritten and requires a checkbox before continuing to the FDA check. Dry runs skip it.
+- **Backup early-stop message:** `logShowsEarlyStop` (renamed from `restoreLogShowsEarlyStop`) is now also checked on backup; a crash gives "Backup stopped early … incomplete" instead of "failed (code 16)".
+- Restore tab shows "Free on this Mac" under the drive picker (`macFreeSpaceMessage`, refreshed on appear and after each restore); restore space messages say "on this Mac"; the restore free-space check uses `NSHomeDirectory()`.
+- Both scripts no longer print "✅ … complete!" during dry runs.
+- **UI text style rule:** no dashes or em dashes in user-facing strings (user preference). Existing strings were rewritten with periods/colons; missing values show "n/a". Commit messages: no dashes, no Co-Authored-By line.
+- Calendar/Reminders (`group.com.apple.calendar`/`.reminders`) are deliberately still excluded: user's calendars come from Exchange.
+
+## Shipped 2026-08-12 → 2026-09-22 (committed 2026-10-14 as `27ac2ff`)
 
 
 - **Full Disk Access pre-flight check — implemented AND wired in.** `hasFullDiskAccess()` / `checkFullDiskAccess(then:)` (~`ContentView.swift:2021`) check readability of `~/Library/Application Support/com.apple.TCC` (a reliable FDA canary — deliberately not a stat check, since TCC only gates actual reads). `checkFullDiskAccess` is called from `startBackup()` (~line 976, gates `proceedWithBackup`/cloud warning) and from the restore space-check flow (~line 1260, gates `proceedWithRestore`) — shows a warning sheet if FDA is missing (since 2026-10-14: refers the user to IT, blocks real runs, dry runs only). This resolves [[project_fda_diagnosis_aug7]] and the old "No Full Disk Access check" open item below.
@@ -119,7 +126,7 @@ Both scripts:
 - Backup and restore now keep separate log arrays (`backupLogEntries`/`restoreLogEntries`) — switching tabs no longer mixes logs.
 - Quick free-space readout on drive selection (`updateDriveFreeSpaceMessage`), ahead of the accurate post-scan check.
 - "bin noch dran" beta caption removed from the Restore tab.
-- `gibString` relabeled "GB" → "GiB" (matches `speedString`'s "MiB/s" convention) — confirmed fixed, `ContentView.swift:2044`.
+- **Units (2026-10-14): all display is decimal, Finder-style** — `gbString` (`%.2f GB`, 1 GB = 10⁹ bytes) and `speedString` (`MB/s`); internal values stay du's 1024-byte KB. Replaced the earlier GiB/MiB labels, which didn't match Finder (93 GB showed as 86.61 GiB) and mixed with a mislabeled binary "MB/s" in the dry-run note.
 - ETA jumpiness fix: both speed EMAs now source from `effectiveBackupDoneKB`/`effectiveRestoreDoneKB` deltas instead of raw `du` growth (`lastEffectiveBackupDoneKB`/`lastEffectiveRestoreDoneKB`); added a second, slower `longSpeedKBps`/`longRestoreSpeedKBps` EMA (~20s time constant) to kill early-run volatility in the cumulative-average term; display smoothing tightened 0.7/0.3 → 0.8/0.2. Build-verified (`xcodebuild` succeeded); not yet re-confirmed against a real backup for jumpiness.
 - `detectDrives()` already filters by `volumeIsInternal`/`volumeIsLocal`/`volumeIsRootFileSystem` — the "hardcoded volume names" open item below was stale even before this batch.
 - App icon exists (`AppIcon-1024.png`) — the "ideas: app icon" item below was stale.

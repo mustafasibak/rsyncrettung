@@ -138,6 +138,7 @@ struct ContentView: View {
     // MARK: - Backup State
     @State private var selectedDrive: String = ""
     @State private var driveFreeSpaceMessage: String = ""
+    @State private var macFreeSpaceMessage: String = ""
     @State private var driveSpaceWatcher: DriveSpaceWatcher? = nil
     @State private var showCloudWarning = false
     @State private var cloudWarningAcknowledged = false
@@ -166,6 +167,10 @@ struct ContentView: View {
     @State private var restoreMirrorMode = false
     @State private var showRestoreMirrorWarning = false
     @State private var restoreMirrorWarningAcknowledged = false
+    @State private var showRestoreInUseWarning = false
+    @State private var restoreInUseAcknowledged = false
+    @State private var restoreInUseHomeKB: Int64 = 0
+    @State private var pendingRestoreInUseContinuation: (() -> Void)? = nil
     @State private var pendingRestorePath: String = ""
     @State private var restoreTreeItems: [RestoreTreeItem] = []
     @State private var expandedRestorePaths: Set<String> = []
@@ -275,16 +280,16 @@ struct ContentView: View {
     var backupGBLine: String {
         if xferTotalKB > 0 {
             let done = min(totalKB, backupPreExistingKB + effectiveBackupDoneKB)
-            return "\(gibString(fromKB: done)) / \(gibString(fromKB: totalKB))  ·  new/changed: \(gibString(fromKB: effectiveBackupDoneKB)) / \(gibString(fromKB: xferTotalKB))"
+            return "\(gbString(fromKB: done)) / \(gbString(fromKB: totalKB))  ·  new/changed: \(gbString(fromKB: effectiveBackupDoneKB)) / \(gbString(fromKB: xferTotalKB))"
         }
-        return "\(gibString(fromKB: copiedKB)) / \(gibString(fromKB: totalKB))"
+        return "\(gbString(fromKB: copiedKB)) / \(gbString(fromKB: totalKB))"
     }
 
     var restoreGBLine: String {
         if restoreXferTotalKB > 0 {
-            return "\(gibString(fromKB: effectiveRestoreDoneKB)) / \(gibString(fromKB: restoreXferTotalKB)) to restore"
+            return "\(gbString(fromKB: effectiveRestoreDoneKB)) / \(gbString(fromKB: restoreXferTotalKB)) to restore"
         }
-        return "\(gibString(fromKB: restoreCopiedKB)) / \(gibString(fromKB: totalKB))"
+        return "\(gbString(fromKB: restoreCopiedKB)) / \(gbString(fromKB: totalKB))"
     }
 
     var logAttributedString: AttributedString {
@@ -527,7 +532,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 20) {
                 Text("Mirror Restore Will Delete Files")
                     .font(.title2).fontWeight(.semibold)
-                Text("Mirror mode deletes everything in your home folder (~/) that is not in the backup — including files you created on this Mac after the last backup was made.\n\nThis cannot be undone.")
+                Text("Mirror mode deletes everything in your home folder (~/) that is not in the backup, including files you created on this Mac after the last backup was made.\n\nThis cannot be undone.")
                     .fixedSize(horizontal: false, vertical: true)
                     .foregroundColor(.secondary)
                 Toggle(isOn: $restoreMirrorWarningAcknowledged) {
@@ -551,6 +556,40 @@ struct ContentView: View {
             }
             .padding(24)
             .frame(width: 420, height: 280)
+        }
+
+        // RESTORE ONTO A MAC IN USE
+        .sheet(isPresented: $showRestoreInUseWarning, onDismiss: { restoreInUseAcknowledged = false; pendingRestoreInUseContinuation = nil }) {
+            VStack(alignment: .leading, spacing: 20) {
+                Text("This Mac Is Already in Use")
+                    .font(.title2).fontWeight(.semibold)
+                Text("Your home folder already contains \(gbString(fromKB: restoreInUseHomeKB)). Restore is meant for a new or empty Mac.\n\nFiles that exist both here and in the backup will be replaced by the backup version, even if the version on this Mac is newer. Work done on this Mac after the backup was made can be lost.")
+                    .fixedSize(horizontal: false, vertical: true)
+                    .foregroundColor(.secondary)
+                Toggle(isOn: $restoreInUseAcknowledged) {
+                    Text("I understand newer files on this Mac may be overwritten")
+                }
+                .toggleStyle(.checkbox)
+                Spacer()
+                HStack {
+                    Button("Cancel") {
+                        showRestoreInUseWarning = false
+                        pendingRestoreInUseContinuation = nil
+                    }
+                    Spacer()
+                    Button("Restore Anyway") {
+                        showRestoreInUseWarning = false
+                        let proceed = pendingRestoreInUseContinuation
+                        pendingRestoreInUseContinuation = nil
+                        proceed?()
+                    }
+                    .disabled(!restoreInUseAcknowledged)
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                }
+            }
+            .padding(24)
+            .frame(width: 460, height: 320)
         }
 
         .onAppear {
@@ -611,6 +650,11 @@ struct ContentView: View {
             selectedBackupFolder = preferredBackupFolder(from: backupFolders)
             loadRestoreTree(forFolder: selectedBackupFolder)
         }
+
+        Text(macFreeSpaceMessage)
+            .font(.system(.footnote, design: .monospaced))
+            .foregroundColor(.secondary)
+            .onAppear { refreshMacFreeSpace() }
 
         Picker("Select Backup Folder:", selection: $selectedBackupFolder) {
             if backupFolders.isEmpty {
@@ -736,7 +780,7 @@ struct ContentView: View {
                 ProgressView()
                     .progressViewStyle(.linear)
                     .frame(maxWidth: 260)
-                Text("Dry run in progress — no files are being copied")
+                Text("Dry run in progress. No files are being copied.")
                     .font(.system(.footnote, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
@@ -786,7 +830,7 @@ struct ContentView: View {
                 ProgressView()
                     .progressViewStyle(.linear)
                     .frame(maxWidth: .infinity)
-                Text("Dry (simulation) run in progress — no files are being copied")
+                Text("Dry (simulation) run in progress. No files are being copied.")
                     .font(.system(.footnote, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
@@ -1111,12 +1155,16 @@ struct ContentView: View {
                         self.skippedFiles = skipped
                         if skipped.isEmpty {
                             self.backupFinishState = .success
-                            self.appendLog(self.dryRunMode ? "Dry run complete." : "Backup complete — a few system-protected files were skipped (normal).", type: .success)
+                            self.appendLog(self.dryRunMode ? "Dry run complete." : "Backup complete. A few system protected files were skipped (normal).", type: .success)
                         } else {
                             self.backupFinishState = .warnings
                             self.appendLog(self.dryRunMode ? "Dry run complete with warnings." : "Backup completed with warnings.", type: .warning)
                             self.showSkippedFiles(skipped, limit: self.dryRunMode ? .max : 20, logPath: logFile)
                         }
+                    case _ where !self.dryRunMode && capturedExitStatus != 30
+                        && self.logShowsEarlyStop(self.backupErrorLogPath.isEmpty ? "\(self.targetPath)/rsync_errors.log" : self.backupErrorLogPath):
+                        self.backupFinishState = .failed
+                        self.appendLog("Backup stopped early: rsync's copy process crashed partway through, so the backup is incomplete. Start the backup again. It continues where it stopped.", type: .error)
                     case 30:
                         self.backupFinishState = .failed
                         self.appendLog("Backup stopped: no data moved for 5 minutes. A file didn't respond, most often a cloud placeholder (iCloud, Creative Cloud) waiting for a download. Pause cloud sync or download the files, then start the backup again. It continues where it stopped.", type: .error)
@@ -1208,7 +1256,7 @@ struct ContentView: View {
         // Measure actual bytes to restore, subtracting any deselected folders.
         // du can take a while on a big backup drive, so run it off the main thread.
         let excludedPaths = excludedRestorePaths
-        let needsHomeSize = restoreMirrorMode && !restoreDryRunMode && priorHomeKB <= 0
+        let needsHomeSize = !restoreDryRunMode && priorHomeKB <= 0
         isPreparing = true
         DispatchQueue.global(qos: .userInitiated).async {
             var sourceKB = Int64(self.duKB(backupFolderPath))
@@ -1227,7 +1275,7 @@ struct ContentView: View {
 
     func finishRestorePreparation(backupFolderPath: String, sourceKB: Int64, currentDestKB: Int64) {
         totalKB = max(1, sourceKB)
-        let freeKB = freeSpaceKB(at: "/")
+        let freeKB = freeSpaceKB(at: NSHomeDirectory())
 
         // For mirror mode the home folder's current content will be deleted as
         // part of the sync, freeing space. The net requirement is only the delta:
@@ -1245,32 +1293,45 @@ struct ContentView: View {
 
         if freeKB < neededKB && !restoreDryRunMode {
             if restoreMirrorMode {
-                spaceCheckMessage = "Not enough space. Free: \(gibString(fromKB: freeKB)), needed: ~\(gibString(fromKB: neededKB)) (backup \(gibString(fromKB: sourceKB)) − home \(gibString(fromKB: currentDestKB)) +10 %)"
+                spaceCheckMessage = "Not enough space on this Mac. Free: \(gbString(fromKB: freeKB)), needed: ~\(gbString(fromKB: neededKB)) (backup \(gbString(fromKB: sourceKB)) − home \(gbString(fromKB: currentDestKB)) +10 %)"
             } else {
-                spaceCheckMessage = "Not enough space on startup disk. Free: \(gibString(fromKB: freeKB)), needed: \(gibString(fromKB: neededKB))"
+                spaceCheckMessage = "Not enough space on this Mac. Free: \(gbString(fromKB: freeKB)), needed: \(gbString(fromKB: neededKB))"
             }
             appendLog("Restore aborted: insufficient disk space.", type: .error)
             return
         }
 
-        var statusParts: [String] = ["Available: \(gibString(fromKB: freeKB))"]
+        var statusParts: [String] = ["Available on this Mac: \(gbString(fromKB: freeKB))"]
         if !excludedRestorePaths.isEmpty {
-            statusParts.append("\(gibString(fromKB: sourceKB)) selected")
+            statusParts.append("\(gbString(fromKB: sourceKB)) selected")
         }
         if restoreMirrorMode && !restoreDryRunMode {
             if neededKB < 102_400 {
                 statusParts.append("already mostly synced (net delta ≈ 0)")
             } else {
-                statusParts.append("~\(gibString(fromKB: neededKB)) net needed (delta +10 %)")
+                statusParts.append("~\(gbString(fromKB: neededKB)) net needed (delta +10 %)")
             }
         }
         spaceCheckMessage = "Space check OK ✓  " + statusParts.joined(separator: "  ·  ")
         appendLog("Disk space OK.", type: .success)
         pendingRestorePath = backupFolderPath
-        checkFullDiskAccess {
-            self.proceedWithRestore(backupFolderPath: backupFolderPath)
+        let startRun = {
+            self.checkFullDiskAccess {
+                self.proceedWithRestore(backupFolderPath: backupFolderPath)
+            }
+        }
+        if !restoreDryRunMode && currentDestKB > restoreInUseThresholdKB {
+            restoreInUseHomeKB = currentDestKB
+            pendingRestoreInUseContinuation = startRun
+            restoreInUseAcknowledged = false
+            showRestoreInUseWarning = true
+        } else {
+            startRun()
         }
     }
+
+    // A freshly set up account is well under this; a Mac in daily use is far above it.
+    let restoreInUseThresholdKB: Int64 = 5_000_000_000 / 1024
 
     func proceedWithRestore(backupFolderPath: String) {
         guard let scriptURL = bundledRestoreScriptURL() else { return }
@@ -1406,6 +1467,7 @@ struct ContentView: View {
                 // run the completion / summary logic.
                 group.notify(queue: .main) {
                     self.isRunning = false
+                    self.refreshMacFreeSpace()
                     self.stopRestoreProgressTimer()
                     self.flushAndStopLogTimer()
 
@@ -1439,7 +1501,7 @@ struct ContentView: View {
                     // since it can also mean e.g. the drive was disconnected.
                     let codesWithPossibleSkips: Set<Int32> = [12, 16, 23, 24]
                     if !isDryRun, capturedExitStatus != 0, capturedExitStatus != 30,
-                       self.restoreLogShowsEarlyStop(restoreLogPath) {
+                       self.logShowsEarlyStop(restoreLogPath) {
                         self.restoreFinishState = .failed
                         self.appendLog("Restore may have stopped early: rsync's copy process crashed partway through, so files after that point may be missing. Run the restore again, and check the error log if it happens again.", type: .error)
                         self.appendLog("Error log: \(restoreLogPath)", type: .info)
@@ -1458,11 +1520,11 @@ struct ContentView: View {
                         if skipped.isEmpty {
                             if capturedExitStatus == 12 {
                                 self.restoreFinishState = .failed
-                                self.appendLog("Restore failed (code: 12 — connection to the source/target may have dropped).", type: .error)
+                                self.appendLog("Restore failed (code 12: the connection to the source or target may have dropped).", type: .error)
                                 self.appendLog("Error log: \(restoreLogPath)", type: .info)
                             } else {
                                 self.restoreFinishState = .success
-                                self.appendLog(isDryRun ? "Dry run complete." : "Restore complete — a few system-protected files were skipped (normal).", type: .success)
+                                self.appendLog(isDryRun ? "Dry run complete." : "Restore complete. A few system protected files were skipped (normal).", type: .success)
                             }
                         } else {
                             self.restoreFinishState = .warnings
@@ -1645,17 +1707,17 @@ struct ContentView: View {
 
         if dryRunMode {
             if neededKB > freeKB {
-                spaceCheckMessage = "Note: Insufficient disk space for actual backup (free: \(gibString(fromKB: freeKB)))"
+                spaceCheckMessage = "Note: Insufficient disk space for actual backup (free: \(gbString(fromKB: freeKB)))"
             } else {
                 spaceCheckMessage = ""
             }
         } else if isRunning {
             if freeKB < neededKB {
-                spaceCheckMessage = "Not enough space on \(selectedDrive). Free: \(gibString(fromKB: freeKB))"
+                spaceCheckMessage = "Not enough space on \(selectedDrive). Free: \(gbString(fromKB: freeKB))"
                 appendLog("Backup aborted: insufficient disk space.", type: .error)
                 process?.terminate()
             } else {
-                spaceCheckMessage = "Space check OK ✓  Available on \(selectedDrive): \(gibString(fromKB: freeKB))"
+                spaceCheckMessage = "Space check OK ✓  Available on \(selectedDrive): \(gbString(fromKB: freeKB))"
                 appendLog("Disk space OK.", type: .success)
                 backupStartTime = Date()
                 startProgressTimer()
@@ -1706,27 +1768,27 @@ struct ContentView: View {
                            .components(separatedBy: " ").first ?? ""
             return Int(digits.replacingOccurrences(of: ",", with: ""))
         }
-        func statGiB(_ prefix: String) -> String? {
+        func statGB(_ prefix: String) -> String? {
             guard let line = dryRunStats.first(where: { $0.hasPrefix(prefix) }),
                   let val = line.components(separatedBy: ":").last,
                   let bytes = parseRsyncSize(val.trimmingCharacters(in: .whitespaces)) else { return nil }
-            return gibString(fromKB: bytes / 1024)
+            return gbString(fromKB: bytes / 1024)
         }
 
         let totalFiles    = statInt("Number of files:")
         let transferFiles = statInt("Number of files transferred:")
-        let totalSize     = statGiB("Total file size")
-        let transferSize  = statGiB("Total transferred file size")
+        let totalSize     = statGB("Total file size")
+        let transferSize  = statGB("Total transferred file size")
 
-        func fmt(_ n: Int?) -> String { n.map { String(format: "%d", $0) } ?? "—" }
+        func fmt(_ n: Int?) -> String { n.map { String(format: "%d", $0) } ?? "n/a" }
 
         let isRestore = label == "restore"
         appendLog("──────── Dry Run Summary ────────", type: .highlight)
         if isRestore {
-            appendLog("Backup scope:        \(fmt(totalFiles)) files   \(totalSize ?? "—")", type: .highlight)
-            let homeScoped = homeFolderScopedKB > 0 ? gibString(fromKB: homeFolderScopedKB) : "measuring..."
+            appendLog("Backup scope:        \(fmt(totalFiles)) files   \(totalSize ?? "n/a")", type: .highlight)
+            let homeScoped = homeFolderScopedKB > 0 ? gbString(fromKB: homeFolderScopedKB) : "measuring..."
             appendLog("Current home (~):    \(homeScoped)", type: .highlight)
-            appendLog("Would transfer:      \(fmt(transferFiles)) files   \(transferSize ?? "—")", type: .highlight)
+            appendLog("Would transfer:      \(fmt(transferFiles)) files   \(transferSize ?? "n/a")", type: .highlight)
             let totalDelete = dryRunToDeleteByFolder.values.reduce(0, +)
             if totalDelete > 0 {
                 appendLog("Would delete (mirror): \(fmt(totalDelete)) Mac-only files", type: .error)
@@ -1744,7 +1806,7 @@ struct ContentView: View {
                     let writeSizeKB = (dryRunToTransferSizeByFolder[folder] ?? 0) / 1024
                     appendLog("  ▸ \(folder):", type: .highlight)
                     if toWrite > 0 {
-                        let sz = writeSizeKB > 0 ? "   \(gibString(fromKB: writeSizeKB))" : ""
+                        let sz = writeSizeKB > 0 ? "   \(gbString(fromKB: writeSizeKB))" : ""
                         appendLog("      +\(toWrite) files from backup\(sz)", type: .success)
                     }
                     if toDel > 0 {
@@ -1762,7 +1824,7 @@ struct ContentView: View {
                         let subCount     = dryRunToTransferBySubfolder[subPath] ?? 0
                         let subSizeBytes = dryRunToTransferSizeBySubfolder[subPath] ?? 0
                         let subSizeKB    = subSizeBytes / 1024
-                        let szStr        = subSizeKB > 0 ? "   \(gibString(fromKB: subSizeKB))" : ""
+                        let szStr        = subSizeKB > 0 ? "   \(gbString(fromKB: subSizeKB))" : ""
                         let subLabel     = ("· " + subName + ":").padding(toLength: 26, withPad: " ", startingAt: 0)
                         appendLog("      \(subLabel)+\(subCount) files\(szStr)", type: .highlight)
                         shownSubCount     += subCount
@@ -1774,21 +1836,21 @@ struct ContentView: View {
                     if otherCount > 0 {
                         let hiddenCount = allSubPaths.count - shownSubPaths.count
                         let moreLabel   = hiddenCount > 0 ? "direct + \(hiddenCount) more sub" : "direct files"
-                        let szStr       = otherSizeKB > 0 ? "   \(gibString(fromKB: otherSizeKB))" : ""
+                        let szStr       = otherSizeKB > 0 ? "   \(gbString(fromKB: otherSizeKB))" : ""
                         let subLabel    = ("· (\(moreLabel)):").padding(toLength: 26, withPad: " ", startingAt: 0)
                         appendLog("      \(subLabel)+\(otherCount) files\(szStr)", type: .info)
                     }
                 }
             }
         } else {
-            appendLog("Home folder (raw):   \(fmt(rawFileCount > 0 ? rawFileCount : nil)) files   \(rawSourceKB > 0 ? gibString(fromKB: rawSourceKB) : "—")", type: .highlight)
-            appendLog("After excludes:      \(fmt(totalFiles)) files   \(totalSize ?? "—")", type: .highlight)
-            appendLog("To copy this run:    \(fmt(transferFiles)) files   \(transferSize ?? "—")", type: .highlight)
+            appendLog("Home folder (raw):   \(fmt(rawFileCount > 0 ? rawFileCount : nil)) files   \(rawSourceKB > 0 ? gbString(fromKB: rawSourceKB) : "n/a")", type: .highlight)
+            appendLog("After excludes:      \(fmt(totalFiles)) files   \(totalSize ?? "n/a")", type: .highlight)
+            appendLog("To copy this run:    \(fmt(transferFiles)) files   \(transferSize ?? "n/a")", type: .highlight)
         }
         let drive = isRestore ? restoreSelectedDrive : selectedDrive
         let stored = storedSpeedKBps(forDrive: drive)
         let speedNote = stored != nil
-            ? "~\(Int((stored! / 1024).rounded())) MB/s measured"
+            ? "~\(Int((stored! * 1024 / 1e6).rounded())) MB/s measured"
             : "~50 MB/s assumed"
         let eta = estimatedDryRunETA(forDrive: drive) ?? "unknown"
         appendLog("Est. \(label) time (\(speedNote)): \(eta)", type: .highlight)
@@ -1828,7 +1890,11 @@ struct ContentView: View {
     func refreshDriveFreeSpace() {
         guard !selectedDrive.isEmpty else { return }
         let freeKB = freeSpaceKB(at: "/Volumes/\(selectedDrive)")
-        driveFreeSpaceMessage = "Free on \(selectedDrive): \(gibString(fromKB: freeKB))"
+        driveFreeSpaceMessage = "Free on \(selectedDrive): \(gbString(fromKB: freeKB))"
+    }
+
+    func refreshMacFreeSpace() {
+        macFreeSpaceMessage = "Free on this Mac: \(gbString(fromKB: freeSpaceKB(at: NSHomeDirectory())))"
     }
 
     func freeSpaceKB(at path: String) -> Int64 {
@@ -1842,7 +1908,7 @@ struct ContentView: View {
     // ETA is recomputed only on the 2 s tick and smoothed against its previous
     // value, so log-flush re-renders can't make the number flap.
     // Speed = longSpeedKBps alone (~2 min EMA). The short EMA is deliberately
-    // left out: replaying a recorded 87 GiB backup, a ~20 s average let every
+    // left out: replaying a recorded 93 GB backup, a ~20 s average let every
     // slow stretch of small files push the ETA from 9 to 22 min and back within
     // a minute (median error 28 %, worst 336 %); the ~2 min average kept the
     // median error at 12 % and never rose more than 11 % per minute. A literal bytes/elapsed
@@ -2002,7 +2068,7 @@ struct ContentView: View {
               let val = line.components(separatedBy: ":").last else { return nil }
         guard let b = parseRsyncSize(val.trimmingCharacters(in: .whitespaces)) else { return nil }
         if b == 0 { return "0s" }
-        let speedKBps = storedSpeedKBps(forDrive: drive) ?? (50 * 1024)
+        let speedKBps = storedSpeedKBps(forDrive: drive) ?? (50e6 / 1024)
         return formatDuration(seconds: Double(b) / 1024.0 / speedKBps)
     }
 
@@ -2069,12 +2135,10 @@ struct ContentView: View {
         }
     }
 
-    func gib(fromKB kb: Int64) -> Double { Double(kb) / 1024 / 1024 }
+    // Internal sizes are du's 1024-byte KB; display is decimal (1 GB = 10⁹ bytes) to match Finder.
+    func gbString(fromKB kb: Int64) -> String { String(format: "%.2f GB", Double(kb) * 1024 / 1e9) }
 
-    // Binary GiB (1 GiB = 1024³ bytes), same math as macOS `du -sh`
-    func gibString(fromKB kb: Int64) -> String { String(format: "%.2f GiB", gib(fromKB: kb)) }
-
-    func speedString(fromKBps kbps: Double) -> String { String(format: "%.2f MiB/s", kbps / 1024.0) }
+    func speedString(fromKBps kbps: Double) -> String { String(format: "%.1f MB/s", kbps * 1024 / 1e6) }
 
     // Coarser buckets on purpose: second-precision ETAs are fake accuracy and
     // make every fluctuation visible.
@@ -2092,9 +2156,9 @@ struct ContentView: View {
         return mins == 0 ? "~\(hours) h" : "~\(hours) h \(mins) min"
     }
 
-    // A receiver crash mid-restore (seen after permission errors in an
+    // A receiver crash mid-run (seen after permission errors in an
     // OS-managed container) silently drops every file after the crash point.
-    func restoreLogShowsEarlyStop(_ logFile: String) -> Bool {
+    func logShowsEarlyStop(_ logFile: String) -> Bool {
         guard let data = FileManager.default.contents(atPath: logFile) else { return false }
         let text = String(decoding: data, as: UTF8.self).lowercased()
         return text.contains("unexpected end of file")
@@ -2127,11 +2191,11 @@ struct ContentView: View {
         let (msg, color): (String, Color) = {
             switch state {
             case .success:
-                return (dryRun ? "Dry run complete — see summary in log." : "Completed successfully.", .green)
+                return (dryRun ? "Dry run complete. See summary in log." : "Completed successfully.", .green)
             case .warnings:
-                return (dryRun ? "Dry run complete with warnings — see log." : "Finished with warnings — scroll log for details.", .orange)
+                return (dryRun ? "Dry run complete with warnings. See log." : "Finished with warnings. Scroll the log for details.", .orange)
             case .failed:
-                return ("Failed — check log for details.", .red)
+                return ("Failed. Check the log for details.", .red)
             case .cancelled:
                 return ("Cancelled.", .gray)
             }

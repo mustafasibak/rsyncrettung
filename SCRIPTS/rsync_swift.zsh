@@ -258,7 +258,9 @@ wait "$RSYNC_PID"
 RSYNC_EXIT=$?
 trap - TERM INT
 
-if [ "$RSYNC_EXIT" -eq 0 ]; then
+if [[ -n "$DRY_RUN_FLAG" ]]; then
+  :
+elif [ "$RSYNC_EXIT" -eq 0 ]; then
   echo "✅ Backup complete! User folder copied to $TARGET"
 else
   echo "EXIT CODE: $RSYNC_EXIT (see $ERROR_LOG)"

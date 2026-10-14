@@ -249,7 +249,9 @@ wait "$RSYNC_PID"
 RSYNC_EXIT=$?
 trap - TERM INT
 
-if [ "$RSYNC_EXIT" -eq 0 ]; then
+if [[ -n "$DRY_RUN_FLAG" ]]; then
+    :
+elif [ "$RSYNC_EXIT" -eq 0 ]; then
     echo "✅ Restore complete!"
 elif [[ "$RSYNC_EXIT" -ne 12 && "$RSYNC_EXIT" -ne 23 && "$RSYNC_EXIT" -ne 24 ]]; then
     echo "❌ Restore failed (code: $RSYNC_EXIT)"
