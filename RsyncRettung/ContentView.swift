@@ -1841,8 +1841,11 @@ struct ContentView: View {
 
     // ETA is recomputed only on the 2 s tick and smoothed against its previous
     // value, so log-flush re-renders can't make the number flap.
-    // Speed = longSpeedKBps (dominant, ~20 s EMA time constant) blended with
-    // speedKBps (short ~6 s EMA) for responsiveness. A literal bytes/elapsed
+    // Speed = longSpeedKBps alone (~2 min EMA). The short EMA is deliberately
+    // left out: replaying a recorded 87 GiB backup, a ~20 s average let every
+    // slow stretch of small files push the ETA from 9 to 22 min and back within
+    // a minute (median error 28 %, worst 336 %); the ~2 min average kept the
+    // median error at 12 % and never rose more than 11 % per minute. A literal bytes/elapsed
     // running average was used here previously and is deliberately NOT used:
     // its denominator (elapsed) is small for the first several minutes of any
     // multi-hour run, which amplifies a single fast/slow tick into a huge
@@ -1857,7 +1860,7 @@ struct ContentView: View {
         guard let start = backupStartTime else { return }
         let elapsed = Date().timeIntervalSince(start)
         guard elapsed >= 15 else { return }
-        let speed = longSpeedKBps * 0.7 + speedKBps * 0.3
+        let speed = longSpeedKBps
         guard speed > 1 else { displayedBackupETA = nil; return }
         let raw = Double(remainingKB) / speed
         displayedBackupETA = displayedBackupETA.map { $0 * 0.8 + raw * 0.2 } ?? raw
@@ -1867,7 +1870,7 @@ struct ContentView: View {
         guard let start = restoreStartTime else { return }
         let elapsed = Date().timeIntervalSince(start)
         guard elapsed >= 15 else { return }
-        let speed = longRestoreSpeedKBps * 0.7 + restoreSpeedKBps * 0.3
+        let speed = longRestoreSpeedKBps
         guard speed > 1 else { displayedRestoreETA = nil; return }
         let raw = Double(restoreRemainingKB) / speed
         displayedRestoreETA = displayedRestoreETA.map { $0 * 0.8 + raw * 0.2 } ?? raw
@@ -1901,17 +1904,17 @@ struct ContentView: View {
                             if deltaKB > 0 {
                                 let instantKBps = Double(deltaKB) / dt
                                 self.speedKBps = (self.speedKBps * 0.7) + (instantKBps * 0.3)
-                                // Slow-decay companion (~20 s time constant) used for the
+                                // Slow-decay companion (~2 min time constant) used for the
                                 // ETA's long-run estimate instead of raw bytes/elapsed —
                                 // a literal running average is most volatile exactly when
                                 // it matters most (the first few minutes of a long run,
                                 // where a small elapsed denominator amplifies any single
                                 // fast/slow tick into a big ETA swing).
-                                self.longSpeedKBps = self.longSpeedKBps == 0 ? instantKBps : (self.longSpeedKBps * 0.9) + (instantKBps * 0.1)
+                                self.longSpeedKBps = self.longSpeedKBps == 0 ? instantKBps : (self.longSpeedKBps * 0.985) + (instantKBps * 0.015)
                             } else {
                                 // Decay instead of freezing so a stalled ETA grows honestly.
                                 self.speedKBps *= 0.75
-                                self.longSpeedKBps *= 0.95
+                                self.longSpeedKBps *= 0.995
                             }
                         }
                     }
@@ -1959,10 +1962,10 @@ struct ContentView: View {
                             if deltaKB > 0 {
                                 let instantKBps = Double(deltaKB) / dt
                                 self.restoreSpeedKBps = (self.restoreSpeedKBps * 0.7) + (instantKBps * 0.3)
-                                self.longRestoreSpeedKBps = self.longRestoreSpeedKBps == 0 ? instantKBps : (self.longRestoreSpeedKBps * 0.9) + (instantKBps * 0.1)
+                                self.longRestoreSpeedKBps = self.longRestoreSpeedKBps == 0 ? instantKBps : (self.longRestoreSpeedKBps * 0.985) + (instantKBps * 0.015)
                             } else {
                                 self.restoreSpeedKBps *= 0.75
-                                self.longRestoreSpeedKBps *= 0.95
+                                self.longRestoreSpeedKBps *= 0.995
                             }
                         }
                     }

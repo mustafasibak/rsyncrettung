@@ -201,9 +201,9 @@ rsync -a --dry-run --stats --modify-window=2 --out-format='%l %n' \
     "$USER_FOLDER/" "$TARGET/" >"$SCAN_LIST" 2>/dev/null
 echo "SCAN_END" >&2
 
-SCAN_KB=$(awk '/^Total file size:/ { gsub(",", "", $(NF-1)); printf "%d", $(NF-1) / 1024 }' "$SCAN_LIST")
+SCAN_KB=$(LC_ALL=C awk '/^Total file size:/ { gsub(",", "", $(NF-1)); printf "%d", $(NF-1) / 1024 }' "$SCAN_LIST")
 # Bytes rsync will actually move this run — basis for progress and ETA.
-XFER_KB=$(awk '/^Total transferred file size:/ { gsub(",", "", $(NF-1)); printf "%d", $(NF-1) / 1024 }' "$SCAN_LIST")
+XFER_KB=$(LC_ALL=C awk '/^Total transferred file size:/ { gsub(",", "", $(NF-1)); printf "%d", $(NF-1) / 1024 }' "$SCAN_LIST")
 
 if [[ "$SCAN_KB" =~ ^[0-9]+$ ]] && [ "$SCAN_KB" -gt 0 ]; then
     echo "TOTAL_KB=$SCAN_KB" >&2

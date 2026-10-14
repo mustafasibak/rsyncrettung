@@ -105,6 +105,8 @@ Both scripts:
 - **Backup `/tmp` paths fixed:** `du` debug output → `/dev/null`; dry-run error log via `mktemp`, passed to Swift with new `ERROR_LOG=` sentinel (`backupErrorLogPath`).
 - `/Creative Cloud Files*` excluded (both scripts).
 - `ENABLE_HARDENED_RUNTIME = YES` (only takes effect once signed with a real identity — ad-hoc builds still show `flags=0x2(adhoc)`).
+- **`awk` locale bug fixed:** `SCAN_KB`/`XFER_KB` parsing now runs `LC_ALL=C awk`. Under a UTF-8 locale (e.g. a terminal with `LANG=de_DE.UTF-8`) BSD awk aborted with "towc: multibyte conversion failure" on openrsync's raw-byte filenames in the scan list, so `TOTAL_KB`/`XFER_KB` were silently never emitted and the app fell back to the old rough progress math. GUI launches usually have no `LANG`, so app runs were probably unaffected, but it was fragile.
+- **ETA averaging slowed to ~2 min:** ETA now uses `longSpeedKBps` alone, with EMA weights 0.985/0.015 per 2 s tick (decay 0.995 on zero-delta ticks); `speedKBps` is only the live speed readout. Measured by recording a real 86.6 GiB backup (home → `Mustafa-1208492`, 13 min, every output line + 2 s `du` samples) and replaying it through the app's exact math: old ~20 s average → median error 28 %, worst 336 %, ETA climbed 9 → 22 min during small-file stretches; new → median 12 %, 90 % within 26 %, worst 29 %, max rise +1 % per tick, steady countdown, slightly optimistic (−10…−25 %). Same constants applied to restore (not separately measured). One recording only; multi-hour runs not yet measured.
 
 ## Shipped 2026-08-12 → 2026-09-22 (committed 2026-10-14 as `4899f49`)
 

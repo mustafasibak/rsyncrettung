@@ -214,7 +214,7 @@ if [[ -z "$DRY_RUN_FLAG" ]]; then
         "${RSYNC_EXCLUDES[@]}" \
         "$BACKUP_FOLDER/" "$TARGET_FOLDER/" >"$SCAN_LIST" 2>/dev/null
     echo "SCAN_END" >&2
-    XFER_KB=$(awk '/^Total transferred file size:/ { gsub(",", "", $(NF-1)); printf "%d", $(NF-1) / 1024 }' "$SCAN_LIST")
+    XFER_KB=$(LC_ALL=C awk '/^Total transferred file size:/ { gsub(",", "", $(NF-1)); printf "%d", $(NF-1) / 1024 }' "$SCAN_LIST")
     [[ "$XFER_KB" =~ ^[0-9]+$ ]] && echo "XFER_KB=$XFER_KB" >&2
     echo "XFER_LIST=$SCAN_LIST" >&2
 fi
