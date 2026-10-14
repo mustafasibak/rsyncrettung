@@ -1,4 +1,6 @@
 import SwiftUI
+import AppKit
+import CoreServices
 
 enum AppTab { case backup, restore }
 enum FinishState { case success, warnings, failed, cancelled }
@@ -11,6 +13,43 @@ struct LogEntry: Identifiable {
     let id = UUID()
     let message: String
     let type: LogType
+}
+
+// Kernel-driven (FSEvents), not polling: the OS notifies us only when
+// something actually changes under `path`, recursively, coalesced into at
+// most one callback per `latency` seconds so e.g. emptying the Trash doesn't
+// fire thousands of times. A plain kqueue watch (as used for the /Volumes
+// hotplug watcher) only sees changes to a directory's own immediate entries,
+// not its subtree, so it can't catch a delete happening anywhere on a volume.
+final class DriveSpaceWatcher {
+    private var stream: FSEventStreamRef?
+    private let onChange: () -> Void
+
+    init?(path: String, onChange: @escaping () -> Void) {
+        self.onChange = onChange
+        self.stream = nil
+        var context = FSEventStreamContext(version: 0, info: Unmanaged.passUnretained(self).toOpaque(), retain: nil, release: nil, copyDescription: nil)
+        let callback: FSEventStreamCallback = { (_, info, _, _, _, _) in
+            guard let info else { return }
+            Unmanaged<DriveSpaceWatcher>.fromOpaque(info).takeUnretainedValue().onChange()
+        }
+        guard let stream = FSEventStreamCreate(
+            nil, callback, &context, [path] as CFArray,
+            FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
+            1.0,
+            FSEventStreamCreateFlags(kFSEventStreamCreateFlagNone)
+        ) else { return nil }
+        self.stream = stream
+        FSEventStreamSetDispatchQueue(stream, .main)
+        FSEventStreamStart(stream)
+    }
+
+    deinit {
+        if let stream {
+            FSEventStreamStop(stream)
+            FSEventStreamInvalidate(stream)
+        }
+    }
 }
 
 struct RestoreTreeItem: Identifiable {
@@ -62,7 +101,8 @@ struct ContentView: View {
 
     // MARK: - Shared State
     @State private var drives: [String] = []
-    @State private var logEntries: [LogEntry] = []
+    @State private var backupLogEntries: [LogEntry] = []
+    @State private var restoreLogEntries: [LogEntry] = []
     @State private var isRunning = false
     @State private var isPreparing = false
     @State private var process: Process?
@@ -73,22 +113,31 @@ struct ContentView: View {
     @State private var progressTimer: Timer?
     @State private var userCancelled = false
     @State private var lastCopiedKB: Int64 = 0
+    @State private var lastEffectiveBackupDoneKB: Int64 = 0
     @State private var lastSampleTime: Date?
     @State private var speedKBps: Double = 0
+    @State private var longSpeedKBps: Double = 0
     @State private var spaceCheckMessage: String = ""
-    @State private var pendingLogEntries: [LogEntry] = []
+    @State private var backupPendingLogEntries: [LogEntry] = []
+    @State private var restorePendingLogEntries: [LogEntry] = []
     @State private var logFlushTimer: Timer?
     @State private var dryRunStats: [String] = []
-    @State private var pinnedLogCount: Int = 0
+    @State private var backupPinnedLogCount: Int = 0
+    @State private var restorePinnedLogCount: Int = 0
     @State private var isScanning = false
     @State private var scanCompleted = false
     @State private var rawSourceKB: Int64 = 0
     @State private var rawFileCount: Int = 0
     @State private var stopWatcher: (() -> Void)?
     @State private var activeTab: AppTab = .backup
+    @State private var showFDAWarning = false
+    @State private var fdaWarningAcknowledged = false
+    @State private var pendingFDAContinuation: (() -> Void)? = nil
 
     // MARK: - Backup State
     @State private var selectedDrive: String = ""
+    @State private var driveFreeSpaceMessage: String = ""
+    @State private var driveSpaceWatcher: DriveSpaceWatcher? = nil
     @State private var showCloudWarning = false
     @State private var cloudWarningAcknowledged = false
     @State private var showAdvancedSettings = false
@@ -136,7 +185,9 @@ struct ContentView: View {
     @State private var restoreCopiedKB: Int64 = 0
     @State private var restoreProgressTimer: Timer? = nil
     @State private var restoreSpeedKBps: Double = 0
+    @State private var longRestoreSpeedKBps: Double = 0
     @State private var restoreLastCopiedKB: Int64 = 0
+    @State private var lastEffectiveRestoreDoneKB: Int64 = 0
     @State private var restoreLastSampleTime: Date? = nil
     @State private var restoreXferTotalKB: Int64 = 0
     @State private var restoreBaselineKB: Int64 = 0
@@ -151,7 +202,11 @@ struct ContentView: View {
     // MARK: - Computed
 
     func appendLog(_ message: String, type: LogType = .info) {
-        logEntries.append(LogEntry(message: message, type: type))
+        if activeTab == .backup {
+            backupLogEntries.append(LogEntry(message: message, type: type))
+        } else {
+            restoreLogEntries.append(LogEntry(message: message, type: type))
+        }
     }
 
     // Bytes done this run = sum of the real sizes of files rsync has finished
@@ -232,12 +287,13 @@ struct ContentView: View {
     }
 
     var logAttributedString: AttributedString {
+        let entries = activeTab == .backup ? backupLogEntries : restoreLogEntries
         var result = AttributedString()
-        for (i, entry) in logEntries.enumerated() {
+        for (i, entry) in entries.enumerated() {
             var part = AttributedString(entry.message)
             part.foregroundColor = color(for: entry.type)
             result += part
-            if i < logEntries.count - 1 { result += AttributedString("\n") }
+            if i < entries.count - 1 { result += AttributedString("\n") }
         }
         return result
     }
@@ -259,11 +315,6 @@ struct ContentView: View {
                 .labelsHidden()
                 .frame(width: 220)
                 .disabled(isRunning || isPreparing)
-                if activeTab == .restore {
-                    Text("bin noch dran")
-                        .font(.caption)
-                        .foregroundColor(.orange)
-                }
             }
 
             if activeTab == .backup {
@@ -361,6 +412,44 @@ struct ContentView: View {
             }
             .padding(24)
             .frame(width: 420, height: 240)
+        }
+
+        // FULL DISK ACCESS WARNING
+        .sheet(isPresented: $showFDAWarning, onDismiss: { fdaWarningAcknowledged = false; pendingFDAContinuation = nil }) {
+            VStack(alignment: .leading, spacing: 20) {
+                Text("Full Disk Access Not Detected")
+                    .font(.title2).fontWeight(.semibold)
+                Text("RsyncRettung doesn't have Full Disk Access. Without it, macOS blocks access to Mail, Safari, Messages, Notes and other protected folders and skips them with no error. The run can still finish and look successful even though that data was never copied.\n\nOpen System Settings, grant Full Disk Access to RsyncRettung, then try again.")
+                    .fixedSize(horizontal: false, vertical: true)
+                    .foregroundColor(.secondary)
+                Toggle(isOn: $fdaWarningAcknowledged) {
+                    Text("I understand some data may not get copied")
+                }
+                .toggleStyle(.checkbox)
+                Spacer()
+                HStack {
+                    Button("Open Privacy Settings") {
+                        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }
+                    Spacer()
+                    Button("Cancel") {
+                        showFDAWarning = false
+                        pendingFDAContinuation = nil
+                    }
+                    Button("Continue Anyway") {
+                        showFDAWarning = false
+                        let proceed = pendingFDAContinuation
+                        pendingFDAContinuation = nil
+                        proceed?()
+                    }
+                    .disabled(!fdaWarningAcknowledged)
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+            .padding(28)
+            .frame(width: 500, height: 340)
         }
 
         // ADVANCED SETTINGS
@@ -485,6 +574,13 @@ struct ContentView: View {
             ForEach(drives, id: \.self) { Text($0).tag($0) }
         }
         .frame(width: 300)
+        .onChange(of: selectedDrive) { _, _ in updateDriveFreeSpaceMessage() }
+
+        if !driveFreeSpaceMessage.isEmpty {
+            Text(driveFreeSpaceMessage)
+                .font(.system(.footnote, design: .monospaced))
+                .foregroundColor(.secondary)
+        }
 
         HStack {
             Button("Start Backup") { startBackup() }
@@ -838,10 +934,11 @@ struct ContentView: View {
         userCancelled = false
         lastSampleTime = nil
         speedKBps = 0
+        longSpeedKBps = 0
         targetPath = ""
         skippedFiles = []
         dryRunStats = []
-        pinnedLogCount = 0
+        backupPinnedLogCount = 0
         isScanning = false
         scanCompleted = false
         rawSourceKB = 0
@@ -872,13 +969,16 @@ struct ContentView: View {
                 self.isPreparing = false
                 self.copiedKB = currentTargetKB
                 self.lastCopiedKB = currentTargetKB
+                self.lastEffectiveBackupDoneKB = 0
                 self.baselineTargetKB = currentTargetKB
                 self.totalKB = max(1, currentTargetKB)
 
-                if self.dryRunMode {
-                    self.proceedWithBackup()
-                } else {
-                    self.showCloudWarning = true
+                self.checkFullDiskAccess {
+                    if self.dryRunMode {
+                        self.proceedWithBackup()
+                    } else {
+                        self.showCloudWarning = true
+                    }
                 }
             }
         }
@@ -953,7 +1053,7 @@ struct ContentView: View {
                 }
                 group.enter()
                 DispatchQueue.main.async {
-                    self.pendingLogEntries.append(contentsOf: newEntries)
+                    self.backupPendingLogEntries.append(contentsOf: newEntries)
                     self.creditBackupFiles(fileLines)
                     self.handleScriptOutput(output)
                     group.leave()
@@ -1027,7 +1127,7 @@ struct ContentView: View {
         do {
             try process.run()
             isRunning = true
-            pinnedLogCount = logEntries.count
+            backupPinnedLogCount = backupLogEntries.count
             startLogFlushTimer()
         } catch {
             process.terminationHandler = nil
@@ -1053,9 +1153,10 @@ struct ContentView: View {
         userCancelled = false
         lastSampleTime = nil
         speedKBps = 0
+        longSpeedKBps = 0
         skippedFiles = []
         dryRunStats = []
-        pinnedLogCount = 0
+        restorePinnedLogCount = 0
         restoreFinishState = nil
         spaceCheckMessage = ""
         rawSourceKB = 0
@@ -1075,6 +1176,7 @@ struct ContentView: View {
         restoreRealDoneBytes = 0
         restoreCopiedKB = 0
         restoreSpeedKBps = 0
+        longRestoreSpeedKBps = 0
         restoreLastCopiedKB = 0
         restoreLastSampleTime = nil
         restoreXferTotalKB = 0
@@ -1155,7 +1257,9 @@ struct ContentView: View {
         spaceCheckMessage = "Space check OK ✓  " + statusParts.joined(separator: "  ·  ")
         appendLog("Disk space OK.", type: .success)
         pendingRestorePath = backupFolderPath
-        proceedWithRestore(backupFolderPath: backupFolderPath)
+        checkFullDiskAccess {
+            self.proceedWithRestore(backupFolderPath: backupFolderPath)
+        }
     }
 
     func proceedWithRestore(backupFolderPath: String) {
@@ -1268,7 +1372,7 @@ struct ContentView: View {
 
                 group.enter()
                 DispatchQueue.main.async {
-                    self.pendingLogEntries.append(contentsOf: newEntries)
+                    self.restorePendingLogEntries.append(contentsOf: newEntries)
                     if isDryRun {
                         for (k, v) in toTransfer     { self.dryRunToTransferByFolder[k, default: 0] += v }
                         for (k, v) in toTransferSize { self.dryRunToTransferSizeByFolder[k, default: 0] += v }
@@ -1305,7 +1409,7 @@ struct ContentView: View {
                         self.showDryRunSummary(label: "restore")
                     }
 
-                    if !isDryRun, [0, 16, 23, 24].contains(capturedExitStatus),
+                    if !isDryRun, [0, 12, 16, 23, 24].contains(capturedExitStatus),
                        let start = self.restoreStartTime {
                         let elapsed = Date().timeIntervalSince(start)
                         if elapsed >= 10 {
@@ -1313,7 +1417,17 @@ struct ContentView: View {
                         }
                     }
 
-                    let restoreLogPath = "/private/tmp/rsync_restore_errors.log"
+                    let restoreLogPath = NSHomeDirectory() + "/Desktop/RsyncRettung_restore_errors.log"
+                    // Repeated permission errors writing into an OS-managed container
+                    // (e.g. an app's Group Container) can make rsync's local
+                    // sender/receiver pipe break, exiting 12 (protocol stream error)
+                    // instead of the usual 23/24 — even though only permission
+                    // issues, not a real transfer failure, caused it. Route it
+                    // through the same skipped-files flow as 16/23/24, but only
+                    // when the log actually shows permission/IO errors explaining
+                    // it — otherwise a code-12 exit is treated as a real failure,
+                    // since it can also mean e.g. the drive was disconnected.
+                    let codesWithPossibleSkips: Set<Int32> = [12, 16, 23, 24]
                     switch capturedExitStatus {
                     case 0:
                         self.restoreFinishState = .success
@@ -1321,12 +1435,18 @@ struct ContentView: View {
                             isDryRun ? "Dry run complete." : "Restore completed successfully.",
                             type: isDryRun ? .info : .success
                         )
-                    case 16, 23, 24:
+                    case _ where codesWithPossibleSkips.contains(capturedExitStatus):
                         let skipped = self.loadSkippedFiles(logFile: restoreLogPath)
                         self.skippedFiles = skipped
                         if skipped.isEmpty {
-                            self.restoreFinishState = .success
-                            self.appendLog(isDryRun ? "Dry run complete." : "Restore complete — a few system-protected files were skipped (normal).", type: .success)
+                            if capturedExitStatus == 12 {
+                                self.restoreFinishState = .failed
+                                self.appendLog("Restore failed (code: 12 — connection to the source/target may have dropped).", type: .error)
+                                self.appendLog("Error log: \(restoreLogPath)", type: .info)
+                            } else {
+                                self.restoreFinishState = .success
+                                self.appendLog(isDryRun ? "Dry run complete." : "Restore complete — a few system-protected files were skipped (normal).", type: .success)
+                            }
                         } else {
                             self.restoreFinishState = .warnings
                             self.appendLog(isDryRun ? "Dry run complete with warnings." : "Restore completed with warnings.", type: .warning)
@@ -1353,7 +1473,7 @@ struct ContentView: View {
         do {
             try process.run()
             isRunning = true
-            pinnedLogCount = logEntries.count
+            restorePinnedLogCount = restoreLogEntries.count
             startLogFlushTimer()
             if !isDryRun { startRestoreProgressTimer() }
         } catch {
@@ -1521,27 +1641,36 @@ struct ContentView: View {
 
     func startLogFlushTimer() {
         logFlushTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { _ in
-            guard !self.pendingLogEntries.isEmpty else { return }
-            self.logEntries.append(contentsOf: self.pendingLogEntries)
-            self.pendingLogEntries.removeAll()
-            let maxTotal = self.pinnedLogCount + 500
-            if self.logEntries.count > maxTotal {
-                let deleteCount = self.logEntries.count - maxTotal
-                self.logEntries.removeSubrange(self.pinnedLogCount ..< self.pinnedLogCount + deleteCount)
-            }
+            self.flushPendingLogs()
         }
     }
 
     func flushAndStopLogTimer() {
         logFlushTimer?.invalidate()
         logFlushTimer = nil
-        guard !pendingLogEntries.isEmpty else { return }
-        logEntries.append(contentsOf: pendingLogEntries)
-        pendingLogEntries.removeAll()
-        let maxTotal = pinnedLogCount + 500
-        if logEntries.count > maxTotal {
-            let deleteCount = logEntries.count - maxTotal
-            logEntries.removeSubrange(pinnedLogCount ..< pinnedLogCount + deleteCount)
+        flushPendingLogs()
+    }
+
+    // Only one of backup/restore runs at a time, so a single timer drains
+    // both queues; the idle one is always empty and the guard is a no-op.
+    func flushPendingLogs() {
+        if !backupPendingLogEntries.isEmpty {
+            backupLogEntries.append(contentsOf: backupPendingLogEntries)
+            backupPendingLogEntries.removeAll()
+            let maxTotal = backupPinnedLogCount + 500
+            if backupLogEntries.count > maxTotal {
+                let deleteCount = backupLogEntries.count - maxTotal
+                backupLogEntries.removeSubrange(backupPinnedLogCount ..< backupPinnedLogCount + deleteCount)
+            }
+        }
+        if !restorePendingLogEntries.isEmpty {
+            restoreLogEntries.append(contentsOf: restorePendingLogEntries)
+            restorePendingLogEntries.removeAll()
+            let maxTotal = restorePinnedLogCount + 500
+            if restoreLogEntries.count > maxTotal {
+                let deleteCount = restoreLogEntries.count - maxTotal
+                restoreLogEntries.removeSubrange(restorePinnedLogCount ..< restorePinnedLogCount + deleteCount)
+            }
         }
     }
 
@@ -1654,6 +1783,30 @@ struct ContentView: View {
         }
     }
 
+    // Quick statfs-based readout shown as soon as a drive is picked, ahead of
+    // the accurate post-scan check in performPostScanSpaceCheck() (which needs
+    // the pre-scan's TOTAL_KB and only runs once Start has been pressed).
+    // Kept live afterwards by a DriveSpaceWatcher (FSEvents) instead of a
+    // timer, so freeing space on the drive updates the label without the
+    // user having to reselect the drive or press Start.
+    func updateDriveFreeSpaceMessage() {
+        guard !selectedDrive.isEmpty else {
+            driveFreeSpaceMessage = ""
+            driveSpaceWatcher = nil
+            return
+        }
+        refreshDriveFreeSpace()
+        driveSpaceWatcher = DriveSpaceWatcher(path: "/Volumes/\(selectedDrive)") {
+            refreshDriveFreeSpace()
+        }
+    }
+
+    func refreshDriveFreeSpace() {
+        guard !selectedDrive.isEmpty else { return }
+        let freeKB = freeSpaceKB(at: "/Volumes/\(selectedDrive)")
+        driveFreeSpaceMessage = "Free on \(selectedDrive): \(gibString(fromKB: freeKB))"
+    }
+
     func freeSpaceKB(at path: String) -> Int64 {
         do {
             let attrs = try FileManager.default.attributesOfFileSystem(forPath: path)
@@ -1663,27 +1816,37 @@ struct ContentView: View {
     }
 
     // ETA is recomputed only on the 2 s tick and smoothed against its previous
-    // value, so log-flush re-renders can't make the number flap. Cumulative
-    // average dominates (0.85) because it is smooth by construction; no ETA is
-    // shown until 15 s of data exists.
+    // value, so log-flush re-renders can't make the number flap.
+    // Speed = longSpeedKBps (dominant, ~20 s EMA time constant) blended with
+    // speedKBps (short ~6 s EMA) for responsiveness. A literal bytes/elapsed
+    // running average was used here previously and is deliberately NOT used:
+    // its denominator (elapsed) is small for the first several minutes of any
+    // multi-hour run, which amplifies a single fast/slow tick into a huge
+    // swing in the average — exactly the "jumps from 31 min to 44 min" failure
+    // mode. Both EMAs have no such amplification, since each tick only ever
+    // moves them by a bounded fraction. No ETA is shown until 15 s of data
+    // exists. Final blend is smoothed harder (0.8/0.2, was 0.7/0.3) because a
+    // single finished large file can credit a big chunk of bytes in one 2 s
+    // tick — the extra damping keeps that from reading as a random jump
+    // instead of a real speed change.
     func updateBackupETA() {
         guard let start = backupStartTime else { return }
         let elapsed = Date().timeIntervalSince(start)
         guard elapsed >= 15 else { return }
-        let speed = (Double(effectiveBackupDoneKB) / elapsed) * 0.85 + speedKBps * 0.15
+        let speed = longSpeedKBps * 0.7 + speedKBps * 0.3
         guard speed > 1 else { displayedBackupETA = nil; return }
         let raw = Double(remainingKB) / speed
-        displayedBackupETA = displayedBackupETA.map { $0 * 0.7 + raw * 0.3 } ?? raw
+        displayedBackupETA = displayedBackupETA.map { $0 * 0.8 + raw * 0.2 } ?? raw
     }
 
     func updateRestoreETA() {
         guard let start = restoreStartTime else { return }
         let elapsed = Date().timeIntervalSince(start)
         guard elapsed >= 15 else { return }
-        let speed = (Double(effectiveRestoreDoneKB) / elapsed) * 0.85 + restoreSpeedKBps * 0.15
+        let speed = longRestoreSpeedKBps * 0.7 + restoreSpeedKBps * 0.3
         guard speed > 1 else { displayedRestoreETA = nil; return }
         let raw = Double(restoreRemainingKB) / speed
-        displayedRestoreETA = displayedRestoreETA.map { $0 * 0.7 + raw * 0.3 } ?? raw
+        displayedRestoreETA = displayedRestoreETA.map { $0 * 0.8 + raw * 0.2 } ?? raw
     }
 
     func startProgressTimer() {
@@ -1696,24 +1859,41 @@ struct ContentView: View {
                 let currentTargetKB = Int64(self.duKB(path))
                 DispatchQueue.main.async {
                     let newCopiedKB = max(0, currentTargetKB)
+                    self.lastCopiedKB = newCopiedKB
+                    self.copiedKB = newCopiedKB
+                    // Speed is sampled from effectiveBackupDoneKB (real credited
+                    // bytes + in-flight du delta), not raw du growth of the target:
+                    // during a rerun that mostly overwrites same-size files, du
+                    // barely moves for long stretches even though real transfer is
+                    // progressing, which used to starve speedKBps via the decay
+                    // branch below and make the ETA swing wildly once that lag
+                    // caught up. effectiveBackupDoneKB already accounts for that.
+                    let newEffectiveKB = self.effectiveBackupDoneKB
                     let now = Date()
                     if let lastTime = self.lastSampleTime {
                         let dt = now.timeIntervalSince(lastTime)
                         if dt > 0 {
-                            let deltaKB = max(0, newCopiedKB - self.lastCopiedKB)
+                            let deltaKB = max(0, newEffectiveKB - self.lastEffectiveBackupDoneKB)
                             if deltaKB > 0 {
                                 let instantKBps = Double(deltaKB) / dt
                                 self.speedKBps = (self.speedKBps * 0.7) + (instantKBps * 0.3)
+                                // Slow-decay companion (~20 s time constant) used for the
+                                // ETA's long-run estimate instead of raw bytes/elapsed —
+                                // a literal running average is most volatile exactly when
+                                // it matters most (the first few minutes of a long run,
+                                // where a small elapsed denominator amplifies any single
+                                // fast/slow tick into a big ETA swing).
+                                self.longSpeedKBps = self.longSpeedKBps == 0 ? instantKBps : (self.longSpeedKBps * 0.9) + (instantKBps * 0.1)
                             } else {
                                 // Decay instead of freezing so a stalled ETA grows honestly.
                                 self.speedKBps *= 0.75
+                                self.longSpeedKBps *= 0.95
                             }
                         }
                     }
                     self.lastSampleTime = now
-                    self.lastCopiedKB = newCopiedKB
-                    self.copiedKB = newCopiedKB
-                    self.backupDoneFloorKB = max(self.backupDoneFloorKB, self.effectiveBackupDoneKB)
+                    self.lastEffectiveBackupDoneKB = newEffectiveKB
+                    self.backupDoneFloorKB = max(self.backupDoneFloorKB, newEffectiveKB)
                     self.updateBackupETA()
                 }
             }
@@ -1734,6 +1914,7 @@ struct ContentView: View {
                 self.restoreBaselineKB = kb
                 self.restoreCopiedKB = kb
                 self.restoreLastCopiedKB = kb
+                self.lastEffectiveRestoreDoneKB = 0
             }
         }
         restoreProgressTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { _ in
@@ -1741,23 +1922,29 @@ struct ContentView: View {
             DispatchQueue.global(qos: .utility).async {
                 let newKB = Int64(self.duKB(NSHomeDirectory()))
                 DispatchQueue.main.async {
+                    self.restoreLastCopiedKB = newKB
+                    self.restoreCopiedKB = newKB
+                    // Same real-bytes speed source as the backup timer — see its
+                    // comment for why raw du deltas alone made the ETA jump.
+                    let newEffectiveKB = self.effectiveRestoreDoneKB
                     let now = Date()
                     if let lastTime = self.restoreLastSampleTime {
                         let dt = now.timeIntervalSince(lastTime)
                         if dt > 0 {
-                            let deltaKB = max(0, newKB - self.restoreLastCopiedKB)
+                            let deltaKB = max(0, newEffectiveKB - self.lastEffectiveRestoreDoneKB)
                             if deltaKB > 0 {
                                 let instantKBps = Double(deltaKB) / dt
                                 self.restoreSpeedKBps = (self.restoreSpeedKBps * 0.7) + (instantKBps * 0.3)
+                                self.longRestoreSpeedKBps = self.longRestoreSpeedKBps == 0 ? instantKBps : (self.longRestoreSpeedKBps * 0.9) + (instantKBps * 0.1)
                             } else {
                                 self.restoreSpeedKBps *= 0.75
+                                self.longRestoreSpeedKBps *= 0.95
                             }
                         }
                     }
                     self.restoreLastSampleTime = now
-                    self.restoreLastCopiedKB = newKB
-                    self.restoreCopiedKB = newKB
-                    self.restoreDoneFloorKB = max(self.restoreDoneFloorKB, self.effectiveRestoreDoneKB)
+                    self.lastEffectiveRestoreDoneKB = newEffectiveKB
+                    self.restoreDoneFloorKB = max(self.restoreDoneFloorKB, newEffectiveKB)
                     self.updateRestoreETA()
                 }
             }
@@ -1824,10 +2011,37 @@ struct ContentView: View {
         return Int(out.split(whereSeparator: \.isWhitespace).first ?? "0") ?? 0
     }
 
+    // The per-user TCC database directory is present on every Mac (created by
+    // the OS regardless of which apps the user actually uses) and is one of
+    // the few paths gated specifically by Full Disk Access rather than any
+    // finer-grained per-category permission — a reliable canary. isReadableFile
+    // is not usable here: TCC enforcement happens at open/read time, not on the
+    // stat-level check that API performs, so it can return true even when a
+    // real read would be denied.
+    func hasFullDiskAccess() -> Bool {
+        let tccDir = NSHomeDirectory() + "/Library/Application Support/com.apple.TCC"
+        return (try? FileManager.default.contentsOfDirectory(atPath: tccDir)) != nil
+    }
+
+    func checkFullDiskAccess(then proceed: @escaping () -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let granted = self.hasFullDiskAccess()
+            DispatchQueue.main.async {
+                if granted {
+                    proceed()
+                } else {
+                    self.pendingFDAContinuation = proceed
+                    self.fdaWarningAcknowledged = false
+                    self.showFDAWarning = true
+                }
+            }
+        }
+    }
+
     func gib(fromKB kb: Int64) -> Double { Double(kb) / 1024 / 1024 }
 
-    // Binary GB (1 GB = 1024³ bytes), same math as macOS `du -sh`
-    func gibString(fromKB kb: Int64) -> String { String(format: "%.2f GB", gib(fromKB: kb)) }
+    // Binary GiB (1 GiB = 1024³ bytes), same math as macOS `du -sh`
+    func gibString(fromKB kb: Int64) -> String { String(format: "%.2f GiB", gib(fromKB: kb)) }
 
     func speedString(fromKBps kbps: Double) -> String { String(format: "%.2f MiB/s", kbps / 1024.0) }
 

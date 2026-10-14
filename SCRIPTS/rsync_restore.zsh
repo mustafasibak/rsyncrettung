@@ -89,6 +89,10 @@ RSYNC_EXCLUDES=(
     "--exclude=Library/NGL"
     "--exclude=Library/Logs/Adobe"
     "--exclude=Library/Logs/NGL"
+    "--exclude=Library/Logs/DiagnosticReports/Retired"
+    "--exclude=Library/Application Support/Adobe/Common/Media Cache Files"
+    "--exclude=Library/Application Support/Adobe/Common/Media Cache"
+    "--exclude=Library/Application Support/Adobe/Common/Peak Files"
     "--exclude=Library/Google/GoogleSoftwareUpdate"
     "--exclude=Library/Application Support/com.apple.wallpaper/aerials"
 
@@ -119,6 +123,10 @@ RSYNC_EXCLUDES=(
     "--exclude=Library/Group Containers/UBF8T346G9.Office/SolutionPackages"
     "--exclude=Library/Group Containers/UBF8T346G9.Office/FontCache"
     "--exclude=Library/Group Containers/UBF8T346G9.Office/ComRPC32"
+    "--exclude=Library/Group Containers/UBF8T346G9.Office/MicrosoftRegistrationDB"
+    "--exclude=Library/Group Containers/UBF8T346G9.Office/SolutionPackagesLock"
+    "--exclude=Library/Group Containers/UBF8T346G9.Office/TemporaryItems"
+    "--exclude=Library/Group Containers/UBF8T346G9.Office/.com.apple.containermanagerd.metadata.plist"
 
     # --- Adobe ---
     "--exclude=Library/Containers/com.adobe.*"
@@ -215,7 +223,7 @@ rsync -av --no-specials --partial --ignore-errors --human-readable --modify-wind
     ${DRY_RUN_FLAG:+--stats} \
     ${DELETE_FLAG:+$DELETE_FLAG} \
     "${RSYNC_EXCLUDES[@]}" \
-    "$BACKUP_FOLDER/" "$TARGET_FOLDER/" 2>/private/tmp/rsync_restore_errors.log &
+    "$BACKUP_FOLDER/" "$TARGET_FOLDER/" 2>"$HOME/Desktop/RsyncRettung_restore_errors.log" &
 
 RSYNC_PID=$!
 # Swift's Cancel sends SIGTERM to this zsh only — forward it, otherwise rsync
@@ -227,7 +235,7 @@ trap - TERM INT
 
 if [ "$RSYNC_EXIT" -eq 0 ]; then
     echo "✅ Restore complete!"
-elif [[ "$RSYNC_EXIT" -ne 23 && "$RSYNC_EXIT" -ne 24 ]]; then
+elif [[ "$RSYNC_EXIT" -ne 12 && "$RSYNC_EXIT" -ne 23 && "$RSYNC_EXIT" -ne 24 ]]; then
     echo "❌ Restore failed (code: $RSYNC_EXIT)"
 fi
 

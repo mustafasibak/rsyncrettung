@@ -74,6 +74,10 @@ RSYNC_EXCLUDES+=(
     "--exclude=Library/NGL"
     "--exclude=Library/Logs/Adobe"
     "--exclude=Library/Logs/NGL"
+    "--exclude=Library/Logs/DiagnosticReports/Retired"
+    "--exclude=Library/Application Support/Adobe/Common/Media Cache Files"
+    "--exclude=Library/Application Support/Adobe/Common/Media Cache"
+    "--exclude=Library/Application Support/Adobe/Common/Peak Files"
     "--exclude=Library/Google/GoogleSoftwareUpdate"
     "--exclude=Library/Application Support/com.apple.wallpaper/aerials"
 
@@ -105,6 +109,10 @@ RSYNC_EXCLUDES+=(
     "--exclude=Library/Group Containers/UBF8T346G9.Office/SolutionPackages"
     "--exclude=Library/Group Containers/UBF8T346G9.Office/FontCache"
     "--exclude=Library/Group Containers/UBF8T346G9.Office/ComRPC32"
+    "--exclude=Library/Group Containers/UBF8T346G9.Office/MicrosoftRegistrationDB"
+    "--exclude=Library/Group Containers/UBF8T346G9.Office/SolutionPackagesLock"
+    "--exclude=Library/Group Containers/UBF8T346G9.Office/TemporaryItems"
+    "--exclude=Library/Group Containers/UBF8T346G9.Office/.com.apple.containermanagerd.metadata.plist"
 
     # --- Adobe ---
     "--exclude=Library/Containers/com.adobe.*"

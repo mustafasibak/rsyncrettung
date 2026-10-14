@@ -97,6 +97,27 @@ Both scripts:
 
 ---
 
+## Shipped since 2026-08-12 (uncommitted, working tree only — verify before assuming any of this is live)
+
+Working tree has been sitting uncommitted since 2026-08-12 (confirmed again 2026-09-22). Nothing below is in git history yet.
+
+- **Full Disk Access pre-flight check — implemented AND wired in.** `hasFullDiskAccess()` / `checkFullDiskAccess(then:)` (~`ContentView.swift:2021`) check readability of `~/Library/Application Support/com.apple.TCC` (a reliable FDA canary — deliberately not a stat check, since TCC only gates actual reads). `checkFullDiskAccess` is called from `startBackup()` (~line 976, gates `proceedWithBackup`/cloud warning) and from the restore space-check flow (~line 1260, gates `proceedWithRestore`) — shows a warning sheet with an "I understand" gate and a direct link to Privacy settings if FDA is missing. This resolves [[project_fda_diagnosis_aug7]] and the old "No Full Disk Access check" open item below.
+- Adobe excludes added: `Application Support/Adobe/Common/Media Cache Files`, `Media Cache`, `Peak Files` (both scripts).
+- Office group-container excludes expanded: `MicrosoftRegistrationDB`, `SolutionPackagesLock`, `TemporaryItems`, `.com.apple.containermanagerd.metadata.plist`; `Library/Logs/DiagnosticReports/Retired` excluded.
+- Restore error log moved off `/tmp` to `$HOME/Desktop/RsyncRettung_restore_errors.log` — **backup side (`rsync_swift.zsh`) still writes to `/tmp/du_debug.txt` and `/tmp/rsync_dryrun_errors.log`, unchanged.**
+- Restore exit code 12 (protocol stream error) now treated as a possible-skips case alongside 16/23/24.
+- Backup and restore now keep separate log arrays (`backupLogEntries`/`restoreLogEntries`) — switching tabs no longer mixes logs.
+- Quick free-space readout on drive selection (`updateDriveFreeSpaceMessage`), ahead of the accurate post-scan check.
+- "bin noch dran" beta caption removed from the Restore tab.
+- `gibString` relabeled "GB" → "GiB" (matches `speedString`'s "MiB/s" convention) — confirmed fixed, `ContentView.swift:2044`.
+- ETA jumpiness fix: both speed EMAs now source from `effectiveBackupDoneKB`/`effectiveRestoreDoneKB` deltas instead of raw `du` growth (`lastEffectiveBackupDoneKB`/`lastEffectiveRestoreDoneKB`); added a second, slower `longSpeedKBps`/`longRestoreSpeedKBps` EMA (~20s time constant) to kill early-run volatility in the cumulative-average term; display smoothing tightened 0.7/0.3 → 0.8/0.2. Build-verified (`xcodebuild` succeeded); not yet re-confirmed against a real backup for jumpiness.
+- `detectDrives()` already filters by `volumeIsInternal`/`volumeIsLocal`/`volumeIsRootFileSystem` — the "hardcoded volume names" open item below was stale even before this batch.
+- App icon exists (`AppIcon-1024.png`) — the "ideas: app icon" item below was stale.
+
+A German-language draft security/IT-review ticket for RsyncRettung lives at `~/Desktop/rsyncrettung_security_review_ticket_de.md` (intentionally kept out of the repo, not git-tracked, written 2026-08-12 against commit `4767f86`). It has several `[ENTSCHEIDEN]` (decide) placeholders — company Developer ID/bundle ID, notarization requirement, MDM PPPC policy for FDA, target team/use case — that need the user's input before it can be submitted. Its §4 (FDA status) is now stale as of this check and should be updated to "implemented and wired in" before submission.
+
+---
+
 ## UI layout
 
 - Fixed window: **640 × 820 pt**
@@ -159,15 +180,15 @@ Both scripts carry their **own separate exclude array — intentional** (backup 
 
 ---
 
-## Known open items (from 2026-07-07 audit, not yet implemented)
+## Known open items (re-verified 2026-09-22 against live code — superseded items removed, see "Shipped since 2026-08-12" above)
 
-- Fixed `/tmp` log paths are symlink-attackable on multi-user Macs (use `$TMPDIR`/`mktemp`); `/tmp/du_debug.txt` is leftover debug output.
-- No Full Disk Access check — without FDA, Mail/Safari/Notes/Messages containers are silently skipped (backup integrity!).
-- No warning when backing up secrets (Keychains, `.ssh`) to unencrypted drives.
+- **Backup-side `/tmp` log paths still fixed/predictable** (`rsync_swift.zsh`: `/tmp/du_debug.txt`, `/tmp/rsync_dryrun_errors.log`) — symlink-attackable on multi-user Macs. Restore side already fixed (moved to `~/Desktop/RsyncRettung_restore_errors.log`); backup side has not been.
+- **No `--timeout=` on either script's main rsync invocation** — confirmed absent (grepped both scripts). A Creative Cloud cloud-placeholder `.ai` file hung a real run on 2026-08-12 ([[project_adobe_backup_incident_aug12]] Issue 1); proposed fix never confirmed by user.
+- No warning when backing up secrets (Keychains, `.ssh`) to unencrypted drives — confirmed still true; flagged in the draft IT/security ticket.
+- **Code signing still `CODE_SIGN_STYLE = Automatic` with no `DEVELOPMENT_TEAM`**, personal bundle ID `com.mustafa.RsyncRettung`, no `.entitlements` file, `ENABLE_APP_SANDBOX = NO` (confirmed in `project.pbxproj`, 2026-09-22). Blocks any real MDM/company deployment — needs a company Developer ID, notarization, and a company bundle ID first. This is the main subject of the draft IT ticket (see above).
 - Non-mirror restore space check demands full source size (false negatives on re-restores).
-- `gibString` prints "GB" but computes binary GiB; speed prints "MiB/s" — unit label mismatch.
-- `detectDrives()` filters by hardcoded volume names instead of `volumeIsInternal`/`IsRemovable` resource keys.
 - `Library/…` exclude patterns are unanchored — since 2026-07-08 this is documented as intentional (matches container-internal caches), but it still also matches e.g. `Documents/myproject/Library/Caches`; root-level patterns are anchored now.
 - `--skip-path` values are raw rsync patterns (folders named `foo*` would over-match).
-- Tracked `xcuserdata` scheme plist should be `git rm --cached`ed; `.DS_Store` missing from `.gitignore`.
-- Ideas: auto-scroll log, finish notification, app icon.
+- Tracked `xcuserdata` scheme plist (`xcschememanagement.plist`) is still git-tracked despite `xcuserdata/` being in `.gitignore` (the rule doesn't retroactively untrack) — needs `git rm --cached`. `.DS_Store` still missing from `.gitignore`.
+- Restore truncation risk not fully closed: a permission-denied write into an OS-managed container (seen with an Office group container) can crash rsync's local receiver outright, silently dropping everything alphabetically after the crash point. Only the specific trigger file was excluded; app doesn't yet detect the crash signature and warn "this restore may have stopped early."
+- Ideas: auto-scroll log, finish notification.
