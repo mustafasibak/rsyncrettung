@@ -142,6 +142,9 @@ struct ContentView: View {
     @State private var driveSpaceWatcher: DriveSpaceWatcher? = nil
     @State private var showCloudWarning = false
     @State private var cloudWarningAcknowledged = false
+    @State private var showUnencryptedWarning = false
+    @State private var unencryptedWarningAcknowledged = false
+    @State private var continueToCloudWarning = false
     @State private var showAdvancedSettings = false
     @State private var mirrorMode = false
     @State private var includeTrash = false
@@ -418,6 +421,43 @@ struct ContentView: View {
             }
             .padding(24)
             .frame(width: 420, height: 240)
+        }
+
+        // UNENCRYPTED DRIVE WARNING
+        // Chained through onDismiss: presenting the next sheet while this one
+        // is still closing would be dropped.
+        .sheet(isPresented: $showUnencryptedWarning, onDismiss: {
+            unencryptedWarningAcknowledged = false
+            if continueToCloudWarning {
+                continueToCloudWarning = false
+                showCloudWarning = true
+            }
+        }) {
+            VStack(alignment: .leading, spacing: 20) {
+                Text("Backup Drive Is Not Encrypted")
+                    .font(.title2).fontWeight(.semibold)
+                Text("\(selectedDrive) is not encrypted. The backup contains your keychains with saved passwords, SSH keys, browser logins, mail and documents. Anyone who gets hold of this drive can read all of it.\n\nTo protect it, encrypt the drive before backing up: in Finder, Control click the drive and choose Encrypt. If you are not sure, ask IT support.")
+                    .fixedSize(horizontal: false, vertical: true)
+                    .foregroundColor(.secondary)
+                Toggle(isOn: $unencryptedWarningAcknowledged) {
+                    Text("I understand anyone with this drive can read the backup")
+                }
+                .toggleStyle(.checkbox)
+                Spacer()
+                HStack {
+                    Button("Cancel") { showUnencryptedWarning = false }
+                    Spacer()
+                    Button("Continue Unencrypted") {
+                        continueToCloudWarning = true
+                        showUnencryptedWarning = false
+                    }
+                    .disabled(!unencryptedWarningAcknowledged)
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                }
+            }
+            .padding(24)
+            .frame(width: 460, height: 320)
         }
 
         // FULL DISK ACCESS WARNING
@@ -869,6 +909,7 @@ struct ContentView: View {
             let updated = detectDrives()
             DispatchQueue.main.async {
                 drives = updated
+                guard !isRunning && !isPreparing else { return }
                 if !updated.contains(selectedDrive) { selectedDrive = updated.first ?? "" }
                 if !updated.contains(restoreSelectedDrive) { restoreSelectedDrive = updated.first ?? "" }
             }
@@ -1026,6 +1067,9 @@ struct ContentView: View {
                 self.checkFullDiskAccess {
                     if self.dryRunMode {
                         self.proceedWithBackup()
+                    } else if !self.driveIsEncrypted(drivePath) {
+                        self.continueToCloudWarning = false
+                        self.showUnencryptedWarning = true
                     } else {
                         self.showCloudWarning = true
                     }
@@ -1161,10 +1205,13 @@ struct ContentView: View {
                             self.appendLog(self.dryRunMode ? "Dry run complete with warnings." : "Backup completed with warnings.", type: .warning)
                             self.showSkippedFiles(skipped, limit: self.dryRunMode ? .max : 20, logPath: logFile)
                         }
-                    case _ where !self.dryRunMode && capturedExitStatus != 30
+                    case _ where !self.dryRunMode && capturedExitStatus != 30 && capturedExitStatus != 31
                         && self.logShowsEarlyStop(self.backupErrorLogPath.isEmpty ? "\(self.targetPath)/rsync_errors.log" : self.backupErrorLogPath):
                         self.backupFinishState = .failed
                         self.appendLog("Backup stopped early: rsync's copy process crashed partway through, so the backup is incomplete. Start the backup again. It continues where it stopped.", type: .error)
+                    case 31:
+                        self.backupFinishState = .failed
+                        self.appendLog("Backup stopped: the backup drive was disconnected. Reconnect it and start the backup again. It continues where it stopped.", type: .error)
                     case 30:
                         self.backupFinishState = .failed
                         self.appendLog("Backup stopped: no data moved for 5 minutes. A file didn't respond, most often a cloud placeholder (iCloud, Creative Cloud) waiting for a download. Pause cloud sync or download the files, then start the backup again. It continues where it stopped.", type: .error)
@@ -1280,7 +1327,8 @@ struct ContentView: View {
         // For mirror mode the home folder's current content will be deleted as
         // part of the sync, freeing space. The net requirement is only the delta:
         //   neededKB = max(0, sourceKB − currentDestKB)
-        // For normal restore we conservatively require the full sourceKB.
+        // A normal restore is checked after the pre-scan instead, against the
+        // data that actually has to be copied (performRestorePostScanSpaceCheck).
         let neededKB: Int64
         if restoreMirrorMode && !restoreDryRunMode {
             // rsync --delete processes directory-by-directory, deleting before
@@ -1288,15 +1336,11 @@ struct ContentView: View {
             // Add 10 % margin for bursts where incoming dirs outpace outgoing ones.
             neededKB = Int64(Double(max(0, sourceKB - currentDestKB)) * 1.1)
         } else {
-            neededKB = sourceKB
+            neededKB = 0
         }
 
-        if freeKB < neededKB && !restoreDryRunMode {
-            if restoreMirrorMode {
-                spaceCheckMessage = "Not enough space on this Mac. Free: \(gbString(fromKB: freeKB)), needed: ~\(gbString(fromKB: neededKB)) (backup \(gbString(fromKB: sourceKB)) − home \(gbString(fromKB: currentDestKB)) +10 %)"
-            } else {
-                spaceCheckMessage = "Not enough space on this Mac. Free: \(gbString(fromKB: freeKB)), needed: \(gbString(fromKB: neededKB))"
-            }
+        if freeKB < neededKB {
+            spaceCheckMessage = "Not enough space on this Mac. Free: \(gbString(fromKB: freeKB)), needed: ~\(gbString(fromKB: neededKB)) (backup \(gbString(fromKB: sourceKB)) − home \(gbString(fromKB: currentDestKB)) +10 %)"
             appendLog("Restore aborted: insufficient disk space.", type: .error)
             return
         }
@@ -1312,8 +1356,12 @@ struct ContentView: View {
                 statusParts.append("~\(gbString(fromKB: neededKB)) net needed (delta +10 %)")
             }
         }
-        spaceCheckMessage = "Space check OK ✓  " + statusParts.joined(separator: "  ·  ")
-        appendLog("Disk space OK.", type: .success)
+        if restoreMirrorMode || restoreDryRunMode {
+            spaceCheckMessage = "Space check OK ✓  " + statusParts.joined(separator: "  ·  ")
+            appendLog("Disk space OK.", type: .success)
+        } else {
+            spaceCheckMessage = statusParts.joined(separator: "  ·  ")
+        }
         pendingRestorePath = backupFolderPath
         let startRun = {
             self.checkFullDiskAccess {
@@ -1348,7 +1396,13 @@ struct ContentView: View {
             let fullPath = "\(backupFolderPath)/\(path)"
             var isDir: ObjCBool = false
             FileManager.default.fileExists(atPath: fullPath, isDirectory: &isDir)
-            args.append("--skip-path=\(path)\(isDir.boolValue ? "/" : "")")
+            args.append("--skip-path=/\(rsyncLiteralPattern(path))\(isDir.boolValue ? "/" : "")")
+        }
+        // Mirror mode would delete this app if it lives inside the home folder (e.g. Desktop or Downloads).
+        let homePrefix = NSHomeDirectory() + "/"
+        let appPath = Bundle.main.bundlePath
+        if appPath.hasPrefix(homePrefix) {
+            args.append("--skip-path=/\(rsyncLiteralPattern(String(appPath.dropFirst(homePrefix.count))))/")
         }
         process.arguments = args
 
@@ -1477,6 +1531,11 @@ struct ContentView: View {
                         return
                     }
 
+                    if self.spaceCheckMessage.hasPrefix("Not enough") {
+                        self.restoreFinishState = .failed
+                        return
+                    }
+
                     if isDryRun {
                         self.showDryRunSummary(label: "restore")
                     }
@@ -1500,6 +1559,11 @@ struct ContentView: View {
                     // it — otherwise a code-12 exit is treated as a real failure,
                     // since it can also mean e.g. the drive was disconnected.
                     let codesWithPossibleSkips: Set<Int32> = [12, 16, 23, 24]
+                    if capturedExitStatus == 31 {
+                        self.restoreFinishState = .failed
+                        self.appendLog("Restore stopped: the drive with the backup was disconnected. Reconnect it and start the restore again. It continues where it stopped.", type: .error)
+                        return
+                    }
                     if !isDryRun, capturedExitStatus != 0, capturedExitStatus != 30,
                        self.logShowsEarlyStop(restoreLogPath) {
                         self.restoreFinishState = .failed
@@ -1565,6 +1629,18 @@ struct ContentView: View {
             pipe.fileHandleForReading.readabilityHandler = nil
             appendLog("Failed to start restore.", type: .error)
         }
+    }
+
+    // rsync only honours backslash escapes in patterns that contain a wildcard
+    // character, so names without one are passed through unchanged.
+    func rsyncLiteralPattern(_ path: String) -> String {
+        guard path.contains(where: { "*?[".contains($0) }) else { return path }
+        var escaped = ""
+        for ch in path {
+            if "\\*?[]".contains(ch) { escaped.append("\\") }
+            escaped.append(ch)
+        }
+        return escaped
     }
 
     // MARK: - Shared Helpers
@@ -1651,7 +1727,14 @@ struct ContentView: View {
             }
             if line.hasPrefix("XFER_KB=") {
                 if let n = Int64(line.replacingOccurrences(of: "XFER_KB=", with: "")) {
-                    if activeTab == .backup { xferTotalKB = n } else { restoreXferTotalKB = n }
+                    if activeTab == .backup {
+                        xferTotalKB = n
+                    } else {
+                        restoreXferTotalKB = n
+                        if isRunning && !restoreDryRunMode && !restoreMirrorMode {
+                            performRestorePostScanSpaceCheck()
+                        }
+                    }
                 }
             }
             if line.hasPrefix("XFER_LIST=") {
@@ -1722,6 +1805,22 @@ struct ContentView: View {
                 backupStartTime = Date()
                 startProgressTimer()
             }
+        }
+    }
+
+    // Without --delete nothing is freed, and existing files that get replaced
+    // are counted in full, so XFER_KB is an upper bound; 5 % covers the
+    // temporary copy rsync writes beside each file.
+    func performRestorePostScanSpaceCheck() {
+        let freeKB = freeSpaceKB(at: NSHomeDirectory())
+        let neededKB = Int64(Double(restoreXferTotalKB) * 1.05)
+        if freeKB < neededKB {
+            spaceCheckMessage = "Not enough space on this Mac. Free: \(gbString(fromKB: freeKB)), needed: \(gbString(fromKB: neededKB))"
+            appendLog("Restore aborted: insufficient disk space.", type: .error)
+            process?.terminate()
+        } else {
+            spaceCheckMessage = "Space check OK ✓  Available on this Mac: \(gbString(fromKB: freeKB))  ·  \(gbString(fromKB: restoreXferTotalKB)) to restore"
+            appendLog("Disk space OK.", type: .success)
         }
     }
 
@@ -1895,6 +1994,11 @@ struct ContentView: View {
 
     func refreshMacFreeSpace() {
         macFreeSpaceMessage = "Free on this Mac: \(gbString(fromKB: freeSpaceKB(at: NSHomeDirectory())))"
+    }
+
+    func driveIsEncrypted(_ path: String) -> Bool {
+        let values = try? URL(fileURLWithPath: path).resourceValues(forKeys: [.volumeIsEncryptedKey])
+        return values?.volumeIsEncrypted == true
     }
 
     func freeSpaceKB(at path: String) -> Int64 {
@@ -2111,7 +2215,12 @@ struct ContentView: View {
     // is not usable here: TCC enforcement happens at open/read time, not on the
     // stat-level check that API performs, so it can return true even when a
     // real read would be denied.
+    // The per-user com.apple.TCC folder can be missing (fresh accounts, some macOS versions), so the system TCC.db is the primary canary.
     func hasFullDiskAccess() -> Bool {
+        if let handle = FileHandle(forReadingAtPath: "/Library/Application Support/com.apple.TCC/TCC.db") {
+            handle.closeFile()
+            return true
+        }
         let tccDir = NSHomeDirectory() + "/Library/Application Support/com.apple.TCC"
         return (try? FileManager.default.contentsOfDirectory(atPath: tccDir)) != nil
     }

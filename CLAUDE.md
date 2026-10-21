@@ -115,10 +115,26 @@ Both scripts:
 - **UI text style rule:** no dashes or em dashes in user-facing strings (user preference). Existing strings were rewritten with periods/colons; missing values show "n/a". Commit messages: no dashes, no Co-Authored-By line.
 - Calendar/Reminders (`group.com.apple.calendar`/`.reminders`) are deliberately still excluded: user's calendars come from Exchange.
 
+## Shipped 2026-10-15
+
+- **Unencrypted drive warning:** real backups check `volumeIsEncryptedKey` on the target (`driveIsEncrypted`); if false, a red sheet (`showUnencryptedWarning`) names keychains, SSH keys, browser logins, mail, explains Finder's Encrypt, and needs a checkbox. Its `onDismiss` then opens the cloud warning (`continueToCloudWarning`), since presenting a sheet while another is closing gets dropped. Verified: APFS volume encryption (`diskutil apfs encryptVolume`) and encrypted images report true, plain APFS false. Note: the internal FileVault Data volume reports false, irrelevant since only externals are checked.
+- **Non-mirror restore space check moved after the pre-scan:** `performRestorePostScanSpaceCheck` runs on `XFER_KB` (needs XFER × 1.05) and terminates the run if short; the pre-flight check now only applies to mirror restores. If `XFER_KB` is missing (scan failed) there is no space check for non-mirror restores.
+- **`--skip-path` anchored and escaped:** Swift passes `/<path>` (previously unanchored: deselecting `Music` skipped every `Music` folder at any depth) via `rsyncLiteralPattern`, which backslash-escapes `\ * ? [ ]` only when the name has a wildcard char (openrsync honours escapes only in wildcard patterns; verified `foo\*` skips `foo*` but not `fooX`).
+- All `Library/...` patterns anchored (see Exclude lists).
+- xcuserdata plist untracked, `.DS_Store` added to `.gitignore`.
+
+## Shipped 2026-10-19 (new Mac restore test)
+
+- **FDA check fixed:** primary canary is now `/Library/Application Support/com.apple.TCC/TCC.db` (exists on every Mac); the per-user `com.apple.TCC` folder was missing on a fresh Mac, so FDA was never detected. Tip for testers: launch from `/Applications`, not from the drive (App Translocation runs a quarantined copy from a random path, which the FDA grant doesn't match).
+- **Drive disconnect → exit 31:** both watchdog loops check the drive every 1 s (backup: `$BACKUP_VOLUME`, not `$TARGET`, which a dry run never creates; restore: `$BACKUP_FOLDER`) and SIGKILL rsync + children; a non-zero rsync exit with the drive gone also maps to 31. Swift shows "drive was disconnected … continues where it stopped". Previously a yanked USB source drive froze the restore with no message (only the 300 s stall timeout would fire). Verified with a force-ejected sparse image: 31 instantly, no orphans (without the fix a disk image gives exit 1 → "failed (code 1)").
+- **Cancel trap hardened:** TERM, wait up to 3 s, then `force_stop_rsync` (KILL children + rsync), exit 20. Verified: 20 in ~1 s, no orphans.
+- Volume watcher no longer switches `selectedDrive`/`restoreSelectedDrive` while `isRunning`/`isPreparing`.
+- **Mirror self-protection:** restore passes `--skip-path=/<relative app path>/` when `Bundle.main.bundlePath` is inside the home folder (app on Desktop/Downloads/`~/Applications` would otherwise be deleted by mirror restore). Restore excludes `/Desktop/RsyncRettung_restore_errors.log`, backup excludes `/rsync_errors.log`: before, mirror mode deleted the log being written (fd keeps writing to an unlinked file, Swift then found no log → skipped-files/early-stop detection silently blind), and an old restore log inside a backup could overwrite the live one in any mode. openrsync verified: excluded receiver paths are neither deleted nor overwritten under `--delete`. Dry-run mirror restore vs. a near-empty fake backup: 42,139 `deleting` lines, none for the log or a skipped folder.
+
 ## Shipped 2026-08-12 → 2026-09-22 (committed 2026-10-14 as `27ac2ff`)
 
 
-- **Full Disk Access pre-flight check — implemented AND wired in.** `hasFullDiskAccess()` / `checkFullDiskAccess(then:)` (~`ContentView.swift:2021`) check readability of `~/Library/Application Support/com.apple.TCC` (a reliable FDA canary — deliberately not a stat check, since TCC only gates actual reads). `checkFullDiskAccess` is called from `startBackup()` (~line 976, gates `proceedWithBackup`/cloud warning) and from the restore space-check flow (~line 1260, gates `proceedWithRestore`) — shows a warning sheet if FDA is missing (since 2026-10-14: refers the user to IT, blocks real runs, dry runs only). This resolves [[project_fda_diagnosis_aug7]] and the old "No Full Disk Access check" open item below.
+- **Full Disk Access pre-flight check — implemented AND wired in.** `hasFullDiskAccess()` / `checkFullDiskAccess(then:)` (~`ContentView.swift:2021`) check readability of `/Library/Application Support/com.apple.TCC/TCC.db`, falling back to `~/Library/Application Support/com.apple.TCC` (since 2026-10-19: the per-user folder can be missing, which blocked FDA on a fresh Mac; still — deliberately not a stat check, since TCC only gates actual reads). `checkFullDiskAccess` is called from `startBackup()` (~line 976, gates `proceedWithBackup`/cloud warning) and from the restore space-check flow (~line 1260, gates `proceedWithRestore`) — shows a warning sheet if FDA is missing (since 2026-10-14: refers the user to IT, blocks real runs, dry runs only). This resolves [[project_fda_diagnosis_aug7]] and the old "No Full Disk Access check" open item below.
 - Adobe excludes added: `Application Support/Adobe/Common/Media Cache Files`, `Media Cache`, `Peak Files` (both scripts).
 - Office group-container excludes expanded: `MicrosoftRegistrationDB`, `SolutionPackagesLock`, `TemporaryItems`, `.com.apple.containermanagerd.metadata.plist`; `Library/Logs/DiagnosticReports/Retired` excluded.
 - Restore error log moved off `/tmp` to `$HOME/Desktop/RsyncRettung_restore_errors.log` (backup side fixed 2026-10-14, see above).
@@ -146,8 +162,8 @@ A German-language draft security/IT-review ticket for RsyncRettung lives at `~/D
 
 ```
 startBackup()  (async du → isPreparing)
-  ├─ dryRunMode  → proceedWithBackup() directly (skips both warning sheets)
-  └─ else        → showCloudWarning sheet → proceedWithBackup()
+  ├─ dryRunMode  → proceedWithBackup() directly (skips all warning sheets)
+  └─ else        → [showUnencryptedWarning if drive unencrypted] → showCloudWarning sheet → proceedWithBackup()
 mirrorMode toggle-on → showMirrorWarning sheet (also restore variant)
 startRestore() → background measurement → finishRestorePreparation() → proceedWithRestore()
 ```
@@ -187,7 +203,7 @@ startRestore() → background measurement → finishRestorePreparation() → pro
 Both scripts carry their **own separate exclude array — intentional** (backup and restore have different needs; e.g. restore additionally excludes `.DS_Store`, shell histories, and login-generated dotfiles so mirror-restore doesn't delete/clobber them). Keep them in sync manually when editing shared entries. Since 2026-06-26 Mail/Safari/Notes/Messages containers are **included** (explicit `--include` lines before the catch-all `com.apple.*` excludes — order matters). `*.app` is **no longer excluded** anywhere.
 
 **2026-07-08 revision (generalized for sharing the app; comments now plain German):**
-- Root-level patterns are **anchored**: `/.Trash*`, `/Nextcloud*` (unanchored they also hit e.g. `Documents/Nextcloud Notizen`). The deeper `Library/...` patterns stay deliberately unanchored so they also match caches *inside* the included Mail/Safari/Notes/SMS containers.
+- Root-level patterns are **anchored**: `/.Trash*`, `/Nextcloud*` (unanchored they also hit e.g. `Documents/Nextcloud Notizen`). Since 2026-10-15 all `Library/...` excludes/includes are anchored too (`/Library/...`); caches inside the included containers are covered by explicit `/Library/Containers/*/Data/Library/Caches` and `/Library/Group Containers/*/Library/Caches`. Verified by diffing a full dry-run file list old vs new: the only change was a nested `Desktop/.../Library` copy now being backed up.
 - **Office fix:** the blanket `UBF8T346G9.Office/` exclude is gone — it would silently drop classic-Outlook mailboxes (`…/Outlook/Outlook 15 Profiles`) and user templates on colleagues' Macs. Only `SolutionPackages`, `FontCache`, `ComRPC32` are excluded now.
 - **Restore fix:** `iCloud Drive*` → exact `/iCloud Drive/` (the old pattern also blocked restoring a real folder like `iCloud Drive (Archiv)`).
 - **New excludes** (post-FDA the TCC-protected system junk started flowing in, seen re-transferring every run): `Library/Trial`, `DuetExpertCenter`, `IntelligencePlatform`, `com.apple.aiml.instrumentation`, `Weather`, `Suggestions`, `Application Support/Knowledge`, `DifferentialPrivacy`, `Application Support/CloudDocs`, `Application Support/com.apple.wallpaper/aerials` (457 MB re-downloadable videos; `Store/` with the settings stays in).
@@ -199,12 +215,7 @@ Both scripts carry their **own separate exclude array — intentional** (backup 
 
 ## Known open items (re-verified 2026-10-14)
 
-- No warning when backing up secrets (Keychains, `.ssh`) to unencrypted drives — confirmed still true; flagged in the draft IT/security ticket.
 - **MDM/FDA plan:** after company signing, give IT bundle ID + Team ID + `codesign -dr -` output for a PPPC profile granting `SystemPolicyAllFiles`. Child processes (zsh/rsync) inherit the app's grant. Test with the exported `.app`, not from Xcode (Xcode becomes the TCC-responsible process).
 - **Code signing still `CODE_SIGN_STYLE = Automatic` with no `DEVELOPMENT_TEAM`**, personal bundle ID `com.mustafa.RsyncRettung`, no `.entitlements` file, `ENABLE_APP_SANDBOX = NO` (confirmed in `project.pbxproj`, 2026-09-22). Blocks any real MDM/company deployment — needs a company Developer ID, notarization, and a company bundle ID first. This is the main subject of the draft IT ticket (see above).
-- Non-mirror restore space check demands full source size (false negatives on re-restores).
-- `Library/…` exclude patterns are unanchored — since 2026-07-08 this is documented as intentional (matches container-internal caches), but it still also matches e.g. `Documents/myproject/Library/Caches`; root-level patterns are anchored now.
-- `--skip-path` values are raw rsync patterns (folders named `foo*` would over-match).
-- Tracked `xcuserdata` scheme plist (`xcschememanagement.plist`) is still git-tracked despite `xcuserdata/` being in `.gitignore` (the rule doesn't retroactively untrack) — needs `git rm --cached`. `.DS_Store` still missing from `.gitignore`.
 - Restore truncation: a permission-denied write into an OS-managed container can still crash rsync's receiver; since 2026-10-14 the app *detects* it and reports "may have stopped early", but the root cause isn't prevented. Backup side has no equivalent detection (an early stop there exits 16 → generic "failed").
 - Ideas: auto-scroll log, finish notification.

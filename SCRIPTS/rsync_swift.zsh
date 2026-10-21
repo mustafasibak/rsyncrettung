@@ -41,119 +41,126 @@ done
 # damit beide exakt die gleichen Dateien sehen.
 # Merke: ein "/" am Anfang heißt "nur direkt im User-Ordner". Ohne "/" trifft
 # das Muster überall, also auch tiefer verschachtelte Ordner gleichen Namens.
+# Deshalb sind alle Library-Muster verankert, sonst würde z. B. auch
+# Documents/projekt/Library/Caches übersprungen.
 RSYNC_EXCLUDES=()
 if [ "$INCLUDE_TRASH" = false ]; then
     RSYNC_EXCLUDES+=("--exclude=/.Trash*")
 fi
 RSYNC_EXCLUDES+=(
+    # --- Eigenes Fehlerlog im Ziel: sonst löscht der Spiegelmodus es während es geschrieben wird ---
+    "--exclude=/rsync_errors.log"
     # --- Cloud & Sync ---
-    "--exclude=Library/CloudStorage"
-    "--exclude=Library/Mobile Documents"
-    "--exclude=Library/Application Support/FileProvider"
-    "--exclude=Library/Application Support/CloudDocs"
-    "--exclude=Library/Group Containers/NKUJUXUJ3B.com.nextcloud.desktopclient"
+    "--exclude=/Library/CloudStorage"
+    "--exclude=/Library/Mobile Documents"
+    "--exclude=/Library/Application Support/FileProvider"
+    "--exclude=/Library/Application Support/CloudDocs"
+    "--exclude=/Library/Group Containers/NKUJUXUJ3B.com.nextcloud.desktopclient"
     "--exclude=/Nextcloud*"
     "--exclude=/Creative Cloud Files*"
 
     # --- Browser & Chat-Apps (Chrome, Teams, Webex, Asana usw.): Session files /
     # zwischendateien, die sich dauernd ändern solange die App läuft und beim nächsten Start sowieso neu angelegt werden ---
-    "--exclude=Library/Application Support/Google/Chrome/Default/Sessions"
-    "--exclude=Library/Application Support/Google/Chrome/GraphiteDawnCache"
-    "--exclude=Library/Application Support/Google/Chrome/Safe Browsing"
-    "--exclude=Library/Application Support/Google/Chrome/Default/WebStorage/"
-    "--exclude=Library/Application Support/Google/Chrome/Default/Service Worker/"
-    "--exclude=Library/Application Support/*/IndexedDB/"
-    "--exclude=Library/Application Support/*/Local Storage/leveldb/"
-    "--exclude=Library/Application Support/*/Session Storage/"
-    "--exclude=Library/Application Support/*/Cache/"
-    "--exclude=Library/Application Support/*/Code Cache/"
-    "--exclude=Library/Application Support/*/GPUCache/"
-    "--exclude=Library/Application Support/*/Service Worker/"
+    "--exclude=/Library/Application Support/Google/Chrome/Default/Sessions"
+    "--exclude=/Library/Application Support/Google/Chrome/GraphiteDawnCache"
+    "--exclude=/Library/Application Support/Google/Chrome/Safe Browsing"
+    "--exclude=/Library/Application Support/Google/Chrome/Default/WebStorage/"
+    "--exclude=/Library/Application Support/Google/Chrome/Default/Service Worker/"
+    "--exclude=/Library/Application Support/*/IndexedDB/"
+    "--exclude=/Library/Application Support/*/Local Storage/leveldb/"
+    "--exclude=/Library/Application Support/*/Session Storage/"
+    "--exclude=/Library/Application Support/*/Cache/"
+    "--exclude=/Library/Application Support/*/Code Cache/"
+    "--exclude=/Library/Application Support/*/GPUCache/"
+    "--exclude=/Library/Application Support/*/Service Worker/"
 
     # --- Caches & Logs ---
-    "--exclude=Library/Caches"
-    "--exclude=Library/NGL"
-    "--exclude=Library/Logs/Adobe"
-    "--exclude=Library/Logs/NGL"
-    "--exclude=Library/Logs/DiagnosticReports/Retired"
-    "--exclude=Library/Application Support/Adobe/Common/Media Cache Files"
-    "--exclude=Library/Application Support/Adobe/Common/Media Cache"
-    "--exclude=Library/Application Support/Adobe/Common/Peak Files"
-    "--exclude=Library/Google/GoogleSoftwareUpdate"
-    "--exclude=Library/Application Support/com.apple.wallpaper/aerials"
+    "--exclude=/Library/Caches"
+    # Caches in den mitgenommenen App-Containern (Mail, Safari usw.)
+    "--exclude=/Library/Containers/*/Data/Library/Caches"
+    "--exclude=/Library/Group Containers/*/Library/Caches"
+    "--exclude=/Library/NGL"
+    "--exclude=/Library/Logs/Adobe"
+    "--exclude=/Library/Logs/NGL"
+    "--exclude=/Library/Logs/DiagnosticReports/Retired"
+    "--exclude=/Library/Application Support/Adobe/Common/Media Cache Files"
+    "--exclude=/Library/Application Support/Adobe/Common/Media Cache"
+    "--exclude=/Library/Application Support/Adobe/Common/Peak Files"
+    "--exclude=/Library/Google/GoogleSoftwareUpdate"
+    "--exclude=/Library/Application Support/com.apple.wallpaper/aerials"
 
     # --- macOS-Systemdaten (Siri, Vorschläge, Nutzungsstatistik usw.):
     # gehören zu genau diesem Mac, das System legt sie von alleine neu an,
     # und sie ändern sich bei jedem Backup ---
-    "--exclude=Library/Biome/"
-    "--exclude=Library/Daemon Containers/"
-    "--exclude=Library/Metadata/CoreSpotlight"
-    "--exclude=Library/Metadata/com.apple.IntelligentSuggestions"
-    "--exclude=Library/PersonalizationPortrait"
-    "--exclude=Library/ContainerManager"
-    "--exclude=Library/StatusKit"
-    "--exclude=Library/DoNotDisturb"
-    "--exclude=Library/Trial"
-    "--exclude=Library/DuetExpertCenter"
-    "--exclude=Library/IntelligencePlatform"
-    "--exclude=Library/com.apple.aiml.instrumentation"
-    "--exclude=Library/Weather"
-    "--exclude=Library/Suggestions"
-    "--exclude=Library/Application Support/Knowledge"
-    "--exclude=Library/Application Support/DifferentialPrivacy"
+    "--exclude=/Library/Biome/"
+    "--exclude=/Library/Daemon Containers/"
+    "--exclude=/Library/Metadata/CoreSpotlight"
+    "--exclude=/Library/Metadata/com.apple.IntelligentSuggestions"
+    "--exclude=/Library/PersonalizationPortrait"
+    "--exclude=/Library/ContainerManager"
+    "--exclude=/Library/StatusKit"
+    "--exclude=/Library/DoNotDisturb"
+    "--exclude=/Library/Trial"
+    "--exclude=/Library/DuetExpertCenter"
+    "--exclude=/Library/IntelligencePlatform"
+    "--exclude=/Library/com.apple.aiml.instrumentation"
+    "--exclude=/Library/Weather"
+    "--exclude=/Library/Suggestions"
+    "--exclude=/Library/Application Support/Knowledge"
+    "--exclude=/Library/Application Support/DifferentialPrivacy"
 
     # --- Microsoft Office ---
     # nur die Unterordner, die Office selbst wieder herunterlädt:
-    "--exclude=Library/Containers/com.microsoft.teams2"
-    "--exclude=Library/Containers/com.microsoft.Excel/Data/Library/Application Support/Microsoft/"
-    "--exclude=Library/Containers/com.microsoft.Word/Data/Library/Application Support/Microsoft/"
-    "--exclude=Library/Group Containers/UBF8T346G9.Office/SolutionPackages"
-    "--exclude=Library/Group Containers/UBF8T346G9.Office/FontCache"
-    "--exclude=Library/Group Containers/UBF8T346G9.Office/ComRPC32"
-    "--exclude=Library/Group Containers/UBF8T346G9.Office/MicrosoftRegistrationDB"
-    "--exclude=Library/Group Containers/UBF8T346G9.Office/SolutionPackagesLock"
-    "--exclude=Library/Group Containers/UBF8T346G9.Office/TemporaryItems"
-    "--exclude=Library/Group Containers/UBF8T346G9.Office/.com.apple.containermanagerd.metadata.plist"
+    "--exclude=/Library/Containers/com.microsoft.teams2"
+    "--exclude=/Library/Containers/com.microsoft.Excel/Data/Library/Application Support/Microsoft/"
+    "--exclude=/Library/Containers/com.microsoft.Word/Data/Library/Application Support/Microsoft/"
+    "--exclude=/Library/Group Containers/UBF8T346G9.Office/SolutionPackages"
+    "--exclude=/Library/Group Containers/UBF8T346G9.Office/FontCache"
+    "--exclude=/Library/Group Containers/UBF8T346G9.Office/ComRPC32"
+    "--exclude=/Library/Group Containers/UBF8T346G9.Office/MicrosoftRegistrationDB"
+    "--exclude=/Library/Group Containers/UBF8T346G9.Office/SolutionPackagesLock"
+    "--exclude=/Library/Group Containers/UBF8T346G9.Office/TemporaryItems"
+    "--exclude=/Library/Group Containers/UBF8T346G9.Office/.com.apple.containermanagerd.metadata.plist"
 
     # --- Adobe ---
-    "--exclude=Library/Containers/com.adobe.*"
+    "--exclude=/Library/Containers/com.adobe.*"
 
     # --- Apple App-Container: Mail, Safari, etc. sind mitzunehmen
     # Rest sind Systemdienste ohne Wert fürs Backup.
     
-    "--exclude=Library/Containers/*/.com.apple.containermanagerd.metadata.plist"
-    "--include=Library/Containers/com.apple.mail"
-    "--include=Library/Containers/com.apple.mail/**"
-    "--include=Library/Containers/com.apple.Safari"
-    "--include=Library/Containers/com.apple.Safari/**"
-    "--include=Library/Containers/com.apple.Notes"
-    "--include=Library/Containers/com.apple.Notes/**"
-    "--include=Library/Containers/com.apple.MobileSMS"
-    "--include=Library/Containers/com.apple.MobileSMS/**"
-    "--exclude=Library/Containers/com.apple.*"
+    "--exclude=/Library/Containers/*/.com.apple.containermanagerd.metadata.plist"
+    "--include=/Library/Containers/com.apple.mail"
+    "--include=/Library/Containers/com.apple.mail/**"
+    "--include=/Library/Containers/com.apple.Safari"
+    "--include=/Library/Containers/com.apple.Safari/**"
+    "--include=/Library/Containers/com.apple.Notes"
+    "--include=/Library/Containers/com.apple.Notes/**"
+    "--include=/Library/Containers/com.apple.MobileSMS"
+    "--include=/Library/Containers/com.apple.MobileSMS/**"
+    "--exclude=/Library/Containers/com.apple.*"
 
     # --- Apple Group-Container ---
-    "--include=Library/Group Containers/group.com.apple.notes"
-    "--include=Library/Group Containers/group.com.apple.notes/**"
-    "--exclude=Library/Group Containers/group.com.apple.*"
-    "--exclude=Library/Group Containers/com.apple.*"
+    "--include=/Library/Group Containers/group.com.apple.notes"
+    "--include=/Library/Group Containers/group.com.apple.notes/**"
+    "--exclude=/Library/Group Containers/group.com.apple.*"
+    "--exclude=/Library/Group Containers/com.apple.*"
 
 
-    "--exclude=Library/CoreFollowUp"
-    "--exclude=Library/Preferences/com.apple.networkserviceproxy.plist"
-    "--exclude=Library/Preferences/com.apple.AddressBook.plist"
-    "--exclude=Library/Preferences/com.apple.homed.notbackedup.plist"
-    "--exclude=Library/Preferences/com.apple.homed.plist"
+    "--exclude=/Library/CoreFollowUp"
+    "--exclude=/Library/Preferences/com.apple.networkserviceproxy.plist"
+    "--exclude=/Library/Preferences/com.apple.AddressBook.plist"
+    "--exclude=/Library/Preferences/com.apple.homed.notbackedup.plist"
+    "--exclude=/Library/Preferences/com.apple.homed.plist"
 
     # --- Misc.: Spezialfälle (aus Erfahrung)
-    "--exclude=Library/Application Support/Claude/vm_bundles"
-    "--exclude=Library/Developer/Xcode/DerivedData"
-    "--exclude=Library/Developer/Xcode/iOS DeviceSupport"
-    "--exclude=Library/Developer/Xcode/watchOS DeviceSupport"
-    "--exclude=Library/Developer/Xcode/tvOS DeviceSupport"
-    "--exclude=Library/Developer/Xcode/visionOS DeviceSupport"
-    "--exclude=Library/Developer/CoreSimulator/Caches"
-    "--exclude=Library/Developer/CoreSimulator/Devices"
+    "--exclude=/Library/Application Support/Claude/vm_bundles"
+    "--exclude=/Library/Developer/Xcode/DerivedData"
+    "--exclude=/Library/Developer/Xcode/iOS DeviceSupport"
+    "--exclude=/Library/Developer/Xcode/watchOS DeviceSupport"
+    "--exclude=/Library/Developer/Xcode/tvOS DeviceSupport"
+    "--exclude=/Library/Developer/Xcode/visionOS DeviceSupport"
+    "--exclude=/Library/Developer/CoreSimulator/Caches"
+    "--exclude=/Library/Developer/CoreSimulator/Devices"
 
 )
 
@@ -240,23 +247,38 @@ rsync -av --no-specials --partial --whole-file --timeout=300 --human-readable --
 RSYNC_PID=$!
 # Swift's Cancel sends SIGTERM to this zsh only — forward it, otherwise rsync
 # keeps copying (or deleting, in mirror mode) as an orphan.
-trap 'kill -TERM "$RSYNC_PID" 2>/dev/null; wait "$RSYNC_PID"; exit 20' TERM INT
+force_stop_rsync() {
+    pkill -KILL -P "$RSYNC_PID" 2>/dev/null
+    kill -KILL "$RSYNC_PID" 2>/dev/null
+    wait "$RSYNC_PID" 2>/dev/null
+}
+# Nach 3 s hart beenden: auf einem abgezogenen Laufwerk reagiert rsync evtl. nicht auf TERM.
+trap 'trap - TERM INT; kill -TERM "$RSYNC_PID" 2>/dev/null; for i in 1 2 3; do kill -0 "$RSYNC_PID" 2>/dev/null || break; sleep 1; done; force_stop_rsync; exit 20' TERM INT
 # Bei --timeout meldet rsync den Stillstand ("poll: timeout"), wartet danach
 # aber evtl. ewig auf den hängenden Gegenprozess — deshalb hier selbst beenden.
 while kill -0 "$RSYNC_PID" 2>/dev/null; do
     if grep -q 'poll: timeout' "$ERROR_LOG" 2>/dev/null; then
         trap - TERM INT
-        pkill -KILL -P "$RSYNC_PID" 2>/dev/null
-        kill -KILL "$RSYNC_PID" 2>/dev/null
-        wait "$RSYNC_PID" 2>/dev/null
+        force_stop_rsync
         echo "⏱ No data moved for 300 s, stopped."
         exit 30
+    fi
+    # Laufwerk abgezogen: sofort stoppen statt bis zum 300 s Timeout zu hängen.
+    if [[ ! -d "$BACKUP_VOLUME" ]]; then
+        trap - TERM INT
+        force_stop_rsync
+        echo "⚠️ Drive disconnected, stopped."
+        exit 31
     fi
     sleep 1
 done
 wait "$RSYNC_PID"
 RSYNC_EXIT=$?
 trap - TERM INT
+if [ "$RSYNC_EXIT" -ne 0 ] && [[ ! -d "$BACKUP_VOLUME" ]]; then
+    echo "⚠️ Drive disconnected, stopped."
+    exit 31
+fi
 
 if [[ -n "$DRY_RUN_FLAG" ]]; then
   :
