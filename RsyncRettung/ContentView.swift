@@ -63,11 +63,13 @@ struct RestoreTreeItem: Identifiable {
 struct SegmentedProgressBar: View {
     var preFraction: Double
     var totalFraction: Double
+    var skippedFraction: Double = 0
 
     var body: some View {
         GeometryReader { geo in
             let pre = min(1.0, max(0.0, preFraction))
-            let new = min(1.0 - pre, max(0.0, totalFraction - pre))
+            let skipped = min(1.0 - pre, max(0.0, skippedFraction))
+            let new = min(1.0 - pre - skipped, max(0.0, totalFraction - pre - skipped))
             ZStack(alignment: .leading) {
                 Capsule().fill(Color.primary.opacity(0.12))
                 HStack(spacing: 0) {
@@ -89,6 +91,9 @@ struct SegmentedProgressBar: View {
                     Rectangle()
                         .fill(Color.accentColor)
                         .frame(width: geo.size.width * new)
+                    Rectangle()
+                        .fill(Color.orange)
+                        .frame(width: geo.size.width * skipped)
                 }
                 .clipShape(Capsule())
             }
@@ -190,6 +195,9 @@ struct ContentView: View {
     @State private var restoreXferSizeMapLoaded = false
     @State private var restoreUncreditedFiles: [String] = []
     @State private var restorePendingFile: String? = nil
+    @State private var restoreCreditedSizes: [String: Int64] = [:]
+    @State private var restoreSkippedPaths: [String] = []
+    @State private var restoreSkippedKB: Int64 = 0
     @State private var restoreRealDoneBytes: Int64 = 0
     @State private var restoreCopiedKB: Int64 = 0
     @State private var restoreProgressTimer: Timer? = nil
@@ -229,7 +237,7 @@ struct ContentView: View {
 
     var effectiveRestoreDoneKB: Int64 {
         let duDelta = max(0, restoreCopiedKB - restoreBaselineKB)
-        let done = max(duDelta, restoreRealDoneBytes / 1024)
+        let done = max(duDelta, restoreRealDoneBytes / 1024 + restoreSkippedKB)
         return max(restoreDoneFloorKB, restoreXferTotalKB > 0 ? min(restoreXferTotalKB, done) : done)
     }
 
@@ -283,14 +291,16 @@ struct ContentView: View {
     var backupGBLine: String {
         if xferTotalKB > 0 {
             let done = min(totalKB, backupPreExistingKB + effectiveBackupDoneKB)
-            return "\(gbString(fromKB: done)) / \(gbString(fromKB: totalKB))  ·  new/changed: \(gbString(fromKB: effectiveBackupDoneKB)) / \(gbString(fromKB: xferTotalKB))"
+            return "\(gbString(fromKB: done)) / \(gbString(fromKB: totalKB))  ·  new/changed: \(sizeString(fromKB: effectiveBackupDoneKB, scaleKB: xferTotalKB)) / \(sizeString(fromKB: xferTotalKB, scaleKB: xferTotalKB))"
         }
         return "\(gbString(fromKB: copiedKB)) / \(gbString(fromKB: totalKB))"
     }
 
     var restoreGBLine: String {
         if restoreXferTotalKB > 0 {
-            return "\(gbString(fromKB: effectiveRestoreDoneKB)) / \(gbString(fromKB: restoreXferTotalKB)) to restore"
+            let size = { (kb: Int64) in self.sizeString(fromKB: kb, scaleKB: self.restoreXferTotalKB) }
+            let line = "\(size(max(0, effectiveRestoreDoneKB - restoreSkippedKB))) / \(size(max(0, restoreXferTotalKB - restoreSkippedKB))) to restore"
+            return restoreSkippedKB > 0 ? line + "  ·  skipped: \(size(restoreSkippedKB))" : line
         }
         return "\(gbString(fromKB: restoreCopiedKB)) / \(gbString(fromKB: totalKB))"
     }
@@ -632,6 +642,11 @@ struct ContentView: View {
             .frame(width: 460, height: 320)
         }
 
+        // Quitting would otherwise leave the script and rsync running with no
+        // window; SIGTERM hits the script's trap, which stops rsync like Cancel.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+            if process?.isRunning == true { process?.terminate() }
+        }
         .onAppear {
             drives = detectDrives()
             if selectedDrive.isEmpty, let first = drives.first {
@@ -843,18 +858,48 @@ struct ContentView: View {
         }
     }
 
+    // The percentage counts only what was really written; skipped bytes fill
+    // the orange end of the bar instead, so a run with skips ends below 100 %.
+    var restorePercentLabel: String {
+        let written = max(0, restoreProgress - restoreSkippedFraction)
+        guard restoreSkippedKB > 0 else { return "\(Int((written * 100).rounded()))%" }
+        return "\(Int((written * 100).rounded(.down)))% restored"
+    }
+
+    var restoreSkippedFraction: Double {
+        restoreXferTotalKB > 0 ? Double(restoreSkippedKB) / Double(restoreXferTotalKB) : 0
+    }
+
+    @ViewBuilder
+    var restoreSkippedList: some View {
+        if !restoreSkippedPaths.isEmpty {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Skipped, macOS did not allow writing (\(restoreSkippedPaths.count)):")
+                ForEach(restoreSkippedPaths.prefix(3), id: \.self) { path in
+                    Text("  \(path)").lineLimit(1).truncationMode(.middle)
+                }
+                if restoreSkippedPaths.count > 3 {
+                    Text("  and \(restoreSkippedPaths.count - 3) more, see the log above")
+                }
+            }
+            .font(.system(.footnote, design: .monospaced))
+            .foregroundStyle(.orange)
+        }
+    }
+
     @ViewBuilder
     var restoreProgressView: some View {
         if let state = restoreFinishState, !isRunning {
             finishBanner(state: state, dryRun: restoreDryRunMode)
             if !restoreDryRunMode {
                 HStack(spacing: 10) {
-                    ProgressView(value: restoreProgress).frame(maxWidth: 260)
-                    Text("\(Int((restoreProgress * 100).rounded()))%").font(.system(.footnote, design: .monospaced))
+                    SegmentedProgressBar(preFraction: 0, totalFraction: restoreProgress, skippedFraction: restoreSkippedFraction).frame(maxWidth: 260)
+                    Text(restorePercentLabel).font(.system(.footnote, design: .monospaced))
                 }
                 Text(restoreGBLine)
                     .font(.system(.footnote, design: .monospaced))
                     .foregroundStyle(.secondary)
+                restoreSkippedList
             }
         } else if isScanning && isRunning {
             HStack(spacing: 10) {
@@ -876,9 +921,9 @@ struct ContentView: View {
             }
         } else if isRunning {
             HStack(spacing: 10) {
-                ProgressView(value: restoreProgress)
+                SegmentedProgressBar(preFraction: 0, totalFraction: restoreProgress, skippedFraction: restoreSkippedFraction)
                     .frame(maxWidth: 260)
-                Text("\(Int((restoreProgress * 100).rounded()))%")
+                Text(restorePercentLabel)
                     .font(.system(.footnote, design: .monospaced))
                 Text("Speed: \(speedString(fromKBps: restoreSpeedKBps))")
                     .font(.system(.footnote, design: .monospaced))
@@ -887,6 +932,7 @@ struct ContentView: View {
             Text(restoreGBLine)
                 .font(.system(.footnote, design: .monospaced))
                 .foregroundStyle(.secondary)
+            restoreSkippedList
             Text(restoreETAString)
                 .font(.system(.footnote, design: .monospaced))
                 .foregroundStyle(.secondary)
@@ -1278,6 +1324,9 @@ struct ContentView: View {
         restoreXferSizeMapLoaded = false
         restoreUncreditedFiles = []
         restorePendingFile = nil
+        restoreCreditedSizes = [:]
+        restoreSkippedPaths = []
+        restoreSkippedKB = 0
         restoreRealDoneBytes = 0
         restoreCopiedKB = 0
         restoreSpeedKBps = 0
@@ -1452,8 +1501,9 @@ struct ContentView: View {
                     !line.hasPrefix("RUNNING_AS=") &&
                     !line.hasPrefix("FILE_COUNT=") &&
                     !line.hasPrefix("HOME_RAW_KB=") &&
-                    !line.hasPrefix("HOME_SCOPED_KB=")
-                }.map { LogEntry(message: $0, type: .info) }
+                    !line.hasPrefix("HOME_SCOPED_KB=") &&
+                    !line.hasPrefix("RESTORE_SKIPPED=")
+                }.map { LogEntry(message: $0, type: $0.hasPrefix("⚠️") ? .warning : .info) }
 
                 // All per-line processing runs on the background thread to avoid
                 // blocking the main thread with FileManager.attributesOfItem calls.
@@ -1567,7 +1617,7 @@ struct ContentView: View {
                     if !isDryRun, capturedExitStatus != 0, capturedExitStatus != 30,
                        self.logShowsEarlyStop(restoreLogPath) {
                         self.restoreFinishState = .failed
-                        self.appendLog("Restore may have stopped early: rsync's copy process crashed partway through, so files after that point may be missing. Run the restore again, and check the error log if it happens again.", type: .error)
+                        self.appendLog("Restore may have stopped early: rsync's copy process crashed partway through, so files after that point may be missing. The error log names the folder that could not be written. Deselect it in the folder list and start the restore again.", type: .error)
                         self.appendLog("Error log: \(restoreLogPath)", type: .info)
                         return
                     }
@@ -1677,8 +1727,12 @@ struct ContentView: View {
                 } else {
                     self.restoreXferSizeByPath = map
                     self.restoreXferSizeMapLoaded = true
+                    for p in self.restoreSkippedPaths { self.dropSkippedRestorePath(p) }
                     for p in self.restoreUncreditedFiles {
-                        if let b = self.restoreXferSizeByPath.removeValue(forKey: p) { self.restoreRealDoneBytes += b }
+                        if let b = self.restoreXferSizeByPath.removeValue(forKey: p) {
+                            self.restoreRealDoneBytes += b
+                            self.restoreCreditedSizes[p] = b
+                        }
                     }
                     self.restoreUncreditedFiles = []
                 }
@@ -1702,17 +1756,76 @@ struct ContentView: View {
         }
     }
 
+    // After a receiver crash the script restarts rsync, which lists again the
+    // files the crashed receiver never wrote: those are un-credited here and
+    // credited again once really written (the floor keeps the bar monotone).
     func creditRestoreFiles(_ paths: [String]) {
         for path in paths {
+            if let b = restoreCreditedSizes.removeValue(forKey: path) {
+                restoreDoneFloorKB = max(restoreDoneFloorKB, effectiveRestoreDoneKB)
+                restoreRealDoneBytes -= b
+                restoreXferSizeByPath[path] = b
+            }
             if let prev = restorePendingFile {
                 if let b = restoreXferSizeByPath.removeValue(forKey: prev) {
                     restoreRealDoneBytes += b
+                    restoreCreditedSizes[prev] = b
                 } else if !restoreXferSizeMapLoaded {
                     restoreUncreditedFiles.append(prev)
                 }
             }
             restorePendingFile = path
         }
+    }
+
+    // A path the script skipped (macOS refused the write) counts as dealt
+    // with: its bytes move from credited/pending into restoreSkippedKB, so the
+    // bar never moves back and reaches 100 % when the last real file is done.
+    func dropSkippedRestorePath(_ skipped: String) {
+        let target = restorePathMatchKey(skipped)
+        restoreDoneFloorKB = max(restoreDoneFloorKB, effectiveRestoreDoneKB)
+        func isUnder(_ p: String) -> Bool {
+            let key = restorePathMatchKey(p)
+            return key == target || (target.hasSuffix("/") && key.hasPrefix(target))
+        }
+        var removedKB: Int64 = 0
+        for key in restoreXferSizeByPath.keys where isUnder(key) {
+            removedKB += (restoreXferSizeByPath.removeValue(forKey: key) ?? 0) / 1024
+        }
+        var creditedBytes: Int64 = 0
+        for key in restoreCreditedSizes.keys where isUnder(key) {
+            creditedBytes += restoreCreditedSizes.removeValue(forKey: key) ?? 0
+        }
+        restoreRealDoneBytes -= creditedBytes
+        restoreSkippedKB += removedKB + creditedBytes / 1024
+        restoreUncreditedFiles.removeAll(where: isUnder)
+        if let pending = restorePendingFile, isUnder(pending) { restorePendingFile = nil }
+        lastEffectiveRestoreDoneKB = effectiveRestoreDoneKB
+    }
+
+    // The skip sentinel carries the real UTF-8 name, rsync's file lines the
+    // escaped form ("Ö" shows as a raw byte plus "\#226"): collapse every run
+    // of non-ASCII characters and \#ooo escapes to one "?" on both sides.
+    func restorePathMatchKey(_ path: String) -> String {
+        guard path.unicodeScalars.contains(where: { !$0.isASCII || $0 == "\\" }) else { return path }
+        let scalars = Array(path.unicodeScalars)
+        var out = String.UnicodeScalarView()
+        var i = 0
+        var inRun = false
+        while i < scalars.count {
+            let isEscape = scalars[i] == "\\" && i + 4 < scalars.count && scalars[i + 1] == "#"
+                && scalars[(i + 2)...(i + 4)].allSatisfy { ("0"..."7").contains($0) }
+            if isEscape || !scalars[i].isASCII {
+                if !inRun { out.append("?") }
+                inRun = true
+                i += isEscape ? 5 : 1
+            } else {
+                out.append(scalars[i])
+                inRun = false
+                i += 1
+            }
+        }
+        return String(out)
     }
 
     func handleScriptOutput(_ output: String) {
@@ -1736,6 +1849,11 @@ struct ContentView: View {
                         }
                     }
                 }
+            }
+            if line.hasPrefix("RESTORE_SKIPPED="), activeTab == .restore {
+                let skipped = String(line.dropFirst("RESTORE_SKIPPED=".count))
+                restoreSkippedPaths.append(skipped)
+                if restoreXferSizeMapLoaded { dropSkippedRestorePath(skipped) }
             }
             if line.hasPrefix("XFER_LIST=") {
                 loadXferSizeList(path: String(line.dropFirst("XFER_LIST=".count)), forBackup: activeTab == .backup)
@@ -2247,6 +2365,12 @@ struct ContentView: View {
     // Internal sizes are du's 1024-byte KB; display is decimal (1 GB = 10⁹ bytes) to match Finder.
     func gbString(fromKB kb: Int64) -> String { String(format: "%.2f GB", Double(kb) * 1024 / 1e9) }
 
+    // One unit per line, picked by the line's largest value: a small run
+    // in GB reads as "0.01 GB" next to a "154.7 MB" skipped amount.
+    func sizeString(fromKB kb: Int64, scaleKB: Int64) -> String {
+        Double(scaleKB) * 1024 >= 1e9 ? gbString(fromKB: kb) : String(format: "%.1f MB", Double(kb) * 1024 / 1e6)
+    }
+
     func speedString(fromKBps kbps: Double) -> String { String(format: "%.1f MB/s", kbps * 1024 / 1e6) }
 
     // Coarser buckets on purpose: second-precision ETAs are fake accuracy and
@@ -2275,10 +2399,13 @@ struct ContentView: View {
 
     func loadSkippedFiles(logFile: String) -> [String] {
         guard let text = try? String(contentsOfFile: logFile, encoding: .utf8) else { return [] }
+        var seen = Set<String>()
         return text.split(separator: "\n")
             .map { String($0) }
+            .filter { seen.insert($0).inserted }
             .filter {
                 ($0.contains("Operation not permitted") ||
+                 $0.contains("restore continued without it") ||
                  $0.contains("Permission denied") ||
                  $0.contains("Interrupted system call") ||
                  $0.contains("Invalid argument")) &&

@@ -227,48 +227,192 @@ if [[ -z "$DRY_RUN_FLAG" ]]; then
 fi
 
 ERROR_LOG="$HOME/Desktop/RsyncRettung_restore_errors.log"
-# --timeout / --whole-file: siehe rsync_swift.zsh
-rsync -av --no-specials --partial --ignore-errors --whole-file --timeout=300 --human-readable --modify-window=2 \
-    ${DRY_RUN_FLAG:+$DRY_RUN_FLAG} \
-    ${DRY_RUN_FLAG:+--stats} \
-    ${DELETE_FLAG:+$DELETE_FLAG} \
-    "${RSYNC_EXCLUDES[@]}" \
-    "$BACKUP_FOLDER/" "$TARGET_FOLDER/" 2>"$ERROR_LOG" &
 
-RSYNC_PID=$!
-# Swift's Cancel sends SIGTERM to this zsh only — forward it, otherwise rsync
-# keeps restoring (or deleting, in mirror mode) as an orphan.
 force_stop_rsync() {
     pkill -KILL -P "$RSYNC_PID" 2>/dev/null
     kill -KILL "$RSYNC_PID" 2>/dev/null
     wait "$RSYNC_PID" 2>/dev/null
 }
-# Nach 3 s hart beenden: auf einem abgezogenen Laufwerk reagiert rsync evtl. nicht auf TERM.
-trap 'trap - TERM INT; kill -TERM "$RSYNC_PID" 2>/dev/null; for i in 1 2 3; do kill -0 "$RSYNC_PID" 2>/dev/null || break; sleep 1; done; force_stop_rsync; exit 20' TERM INT
-# Bei --timeout meldet rsync den Stillstand ("poll: timeout"), wartet danach
-# aber evtl. ewig auf den hängenden Gegenprozess — deshalb hier selbst beenden.
-while kill -0 "$RSYNC_PID" 2>/dev/null; do
-    if grep -q 'poll: timeout' "$ERROR_LOG" 2>/dev/null; then
-        trap - TERM INT
-        force_stop_rsync
-        echo "⏱ No data moved for 300 s, stopped."
-        exit 30
+
+# Verweigert macOS das Schreiben in einen geschützten Ordner (z. B. einen
+# App-Container), stürzt der rsync-Empfänger von openrsync komplett ab und
+# alles danach fehlt. Gibt den betroffenen Pfad (relativ) aus dem Fehlerlog aus.
+# Pfad aus einer rsync-Fehlermeldung (ohne "rsync(PID): error: ").
+path_from_error() {
+    local msg="$1" cand dir base
+    if [[ "$msg" =~ "^[a-z_]+: '(.+)': " ]]; then
+        cand="${match[1]}"
+    elif [[ "$msg" =~ "^(.+): [a-z_]+" ]]; then
+        cand="${match[1]%%: *}"
+    else
+        return 1
     fi
-    # Laufwerk abgezogen: sofort stoppen statt bis zum 300 s Timeout zu hängen.
-    if [[ ! -d "$BACKUP_FOLDER" ]]; then
-        trap - TERM INT
-        force_stop_rsync
+    # Temporäre Datei ".name.XXXXXXXXXX" auf den echten Namen zurückführen
+    dir="${cand:h}"; base="${cand:t}"
+    if [[ "$base" =~ '^\.(.+)\.[A-Za-z0-9]{10}$' ]]; then
+        base="${match[1]}"
+        [[ "$dir" == "$cand" || "$dir" == "." ]] && cand="$base" || cand="$dir/$base"
+    fi
+    print -r -- "${cand#./}"
+}
+
+refused_path_from_log() {
+    local receiver_pid line msg cand
+    receiver_pid=$(LC_ALL=C grep -E '^rsync\([0-9]+\): error: rsync_receiver$' "$ERROR_LOG" | head -1 | LC_ALL=C sed -E 's/^rsync\(([0-9]+)\).*/\1/')
+    [[ -z "$receiver_pid" ]] && return 1
+    while IFS= read -r line; do
+        msg="${line#rsync\($receiver_pid\): error: }"
+        [[ "$msg" == "$line" ]] && continue
+        cand=$(path_from_error "$msg") || continue
+        if [[ -n "$cand" && ( -e "$BACKUP_FOLDER/$cand" || -L "$BACKUP_FOLDER/$cand" || -e "$TARGET_FOLDER/$cand" ) ]]; then
+            print -r -- "$cand"
+            return 0
+        fi
+    done < <(LC_ALL=C grep -F "rsync($receiver_pid): error: " "$ERROR_LOG")
+    return 1
+}
+
+# Ohne Absturz überspringt rsync verweigerte Dateien selbst (Exit 23). Gibt
+# jede Datei aus, die in den Fehlern vorkommt und danach nicht der Datei im
+# Backup entspricht, also nicht geschrieben wurde. Inhalt vergleichen, nicht
+# Größe/Zeit: openrsync setzt die Zeit aus dem Backup auch auf die alte,
+# nicht ersetzte Datei, die dann gleich aussieht.
+unwritten_files_from_log() {
+    local line cand
+    local -A seen
+    while IFS= read -r line; do
+        cand=$(path_from_error "${line#rsync\([0-9]*\): error: }") || continue
+        [[ -z "$cand" || -n "${seen[$cand]}" ]] && continue
+        seen[$cand]=1
+        [[ -f "$BACKUP_FOLDER/$cand" && ! -L "$BACKUP_FOLDER/$cand" ]] || continue
+        cmp -s "$BACKUP_FOLDER/$cand" "$TARGET_FOLDER/$cand" || print -r -- "$cand"
+    done < <(LC_ALL=C grep -E '^rsync\([0-9]+\): error: .*(Operation not permitted|Permission denied)' "$ERROR_LOG")
+}
+
+# Wie rsyncLiteralPattern in Swift: Platzhalterzeichen nur maskieren, wenn welche vorkommen.
+literal_pattern() {
+    local p="$1"
+    if [[ "$p" == *[\*\?\[]* ]]; then
+        p="${p//\\/\\\\}"; p="${p//\*/\\*}"; p="${p//\?/\\?}"; p="${p//\[/\\[}"; p="${p//\]/\\]}"
+    fi
+    print -r -- "$p"
+}
+
+SKIPPED_ITEMS=()
+FAILED_PARENTS=()
+BLIND_RETRY_USED=""
+EARLIER_LOG=$(mktemp "${TMPDIR:-/tmp}/rsync_restore_earlier.XXXXXX")
+
+while true; do
+    # --timeout / --whole-file: siehe rsync_swift.zsh
+    rsync -av --no-specials --partial --ignore-errors --whole-file --timeout=300 --human-readable --modify-window=2 \
+        ${DRY_RUN_FLAG:+$DRY_RUN_FLAG} \
+        ${DRY_RUN_FLAG:+--stats} \
+        ${DELETE_FLAG:+$DELETE_FLAG} \
+        "${RSYNC_EXCLUDES[@]}" \
+        "$BACKUP_FOLDER/" "$TARGET_FOLDER/" 2>"$ERROR_LOG" &
+
+    RSYNC_PID=$!
+    # Swift's Cancel sends SIGTERM to this zsh only — forward it, otherwise rsync
+    # keeps restoring (or deleting, in mirror mode) as an orphan.
+    # Nach 3 s hart beenden: auf einem abgezogenen Laufwerk reagiert rsync evtl. nicht auf TERM.
+    trap 'trap - TERM INT; kill -TERM "$RSYNC_PID" 2>/dev/null; for i in 1 2 3; do kill -0 "$RSYNC_PID" 2>/dev/null || break; sleep 1; done; force_stop_rsync; rm -f "$EARLIER_LOG"; exit 20' TERM INT
+    # Bei --timeout meldet rsync den Stillstand ("poll: timeout"), wartet danach
+    # aber evtl. ewig auf den hängenden Gegenprozess — deshalb hier selbst beenden.
+    while kill -0 "$RSYNC_PID" 2>/dev/null; do
+        if grep -q 'poll: timeout' "$ERROR_LOG" 2>/dev/null; then
+            trap - TERM INT
+            force_stop_rsync
+            rm -f "$EARLIER_LOG"
+            echo "⏱ No data moved for 300 s, stopped."
+            exit 30
+        fi
+        # Laufwerk abgezogen: sofort stoppen statt bis zum 300 s Timeout zu hängen.
+        if [[ ! -d "$BACKUP_FOLDER" ]]; then
+            trap - TERM INT
+            force_stop_rsync
+            rm -f "$EARLIER_LOG"
+            echo "⚠️ Drive disconnected, stopped."
+            exit 31
+        fi
+        sleep 1
+    done
+    wait "$RSYNC_PID"
+    RSYNC_EXIT=$?
+    trap - TERM INT
+    if [ "$RSYNC_EXIT" -ne 0 ] && [[ ! -d "$BACKUP_FOLDER" ]]; then
+        rm -f "$EARLIER_LOG"
         echo "⚠️ Drive disconnected, stopped."
         exit 31
     fi
-    sleep 1
+
+    [[ -z "$DRY_RUN_FLAG" && "$RSYNC_EXIT" -ne 0 ]] || break
+    LC_ALL=C grep -q 'unexpected end of file' "$ERROR_LOG" 2>/dev/null || break
+    # Kein Pfad erkennbar: einmal ohne Ausschluss neu starten, beim zweiten Mal aufgeben.
+    if ! REFUSED=$(refused_path_from_log); then
+        [[ -z "$BLIND_RETRY_USED" ]] || break
+        BLIND_RETRY_USED=1
+        LC_ALL=C grep -v -E 'error: (unexpected end of file|io_[a-z_]+|rsync_[a-z_]+)$|warning: child [0-9]+ exited' "$ERROR_LOG" >> "$EARLIER_LOG"
+        echo "⚠️ The copy process stopped unexpectedly. Restarting the restore, already restored files are skipped quickly..."
+        continue
+    fi
+
+    # Erst nur die Datei überspringen. Scheitert eine zweite Datei im selben
+    # Ordner (mind. 3 Ebenen tief, also nie z. B. Documents oder
+    # Library/Preferences als Ganzes), den ganzen Ordner überspringen.
+    SKIP="$REFUSED"
+    PARENT="${REFUSED:h}"
+    if [[ "$PARENT" != "$REFUSED" && "$PARENT" == */*/* && ${FAILED_PARENTS[(Ie)$PARENT]} -gt 0 ]]; then
+        SKIP="$PARENT"
+    fi
+    FAILED_PARENTS+=("$PARENT")
+    if [[ -d "$BACKUP_FOLDER/$SKIP" && ! -L "$BACKUP_FOLDER/$SKIP" ]]; then
+        SKIP="$SKIP/"
+    fi
+    [[ ${SKIPPED_ITEMS[(Ie)$SKIP]} -gt 0 ]] && break
+
+    # Bei verweigertem Umbenennen bleibt die versteckte Zwischendatei liegen
+    LC_ALL=C grep -E ': move_file: ' "$ERROR_LOG" | LC_ALL=C sed -E 's/^rsync\([0-9]+\): error: //; s/: move_file: .*$//' | while IFS= read -r tmp; do
+        [[ "${tmp:t}" =~ '^\..+\.[A-Za-z0-9]{10}$' && -f "$TARGET_FOLDER/$tmp" ]] && rm -f "$TARGET_FOLDER/$tmp"
+    done
+
+    SKIPPED_ITEMS+=("$SKIP")
+    RSYNC_EXCLUDES+=("--exclude=/$(literal_pattern "$SKIP")")
+    LC_ALL=C grep -v -E 'error: (unexpected end of file|io_[a-z_]+|rsync_[a-z_]+)$|warning: child [0-9]+ exited' "$ERROR_LOG" >> "$EARLIER_LOG"
+    print -r -- "$SKIP: restore continued without it (macOS did not allow writing here)" >> "$EARLIER_LOG"
+    echo "RESTORE_SKIPPED=$SKIP" >&2
+    echo "⚠️ macOS did not allow writing to $SKIP. Skipped it and restarting the restore, already restored files are skipped quickly..."
 done
-wait "$RSYNC_PID"
-RSYNC_EXIT=$?
-trap - TERM INT
-if [ "$RSYNC_EXIT" -ne 0 ] && [[ ! -d "$BACKUP_FOLDER" ]]; then
-    echo "⚠️ Drive disconnected, stopped."
-    exit 31
+
+if [[ -z "$DRY_RUN_FLAG" && "$RSYNC_EXIT" -eq 23 ]]; then
+    unwritten_files_from_log | while IFS= read -r item; do
+        echo "RESTORE_SKIPPED=$item" >&2
+        print -r -- "$item"
+    done > "$EARLIER_LOG.unwritten"
+    SKIPPED_ITEMS+=("${(@f)$(<"$EARLIER_LOG.unwritten")}")
+    SKIPPED_ITEMS=(${SKIPPED_ITEMS:#})
+    rm -f "$EARLIER_LOG.unwritten"
+fi
+
+# Zusammenfassung ohne Dateien, deren Ordner danach ganz übersprungen wurde
+SUMMARY_ITEMS=()
+for item in "${SKIPPED_ITEMS[@]}"; do
+    [[ ${SKIPPED_ITEMS[(Ie)${item:h}/]} -gt 0 ]] || SUMMARY_ITEMS+=("$item")
+done
+if [ ${#SUMMARY_ITEMS[@]} -gt 0 ]; then
+    echo "⚠️ ${#SUMMARY_ITEMS[@]} item(s) could not be written because macOS did not allow it:"
+    for item in "${SUMMARY_ITEMS[@]}"; do
+        echo "⚠️   $item"
+    done
+fi
+
+if [[ -s "$EARLIER_LOG" ]]; then
+    cat "$EARLIER_LOG" "$ERROR_LOG" > "$EARLIER_LOG.all" && cat "$EARLIER_LOG.all" > "$ERROR_LOG"
+    rm -f "$EARLIER_LOG.all"
+fi
+rm -f "$EARLIER_LOG"
+if [ "$RSYNC_EXIT" -eq 0 ] && [ ${#SKIPPED_ITEMS[@]} -gt 0 ]; then
+    RSYNC_EXIT=23
 fi
 
 if [[ -n "$DRY_RUN_FLAG" ]]; then
