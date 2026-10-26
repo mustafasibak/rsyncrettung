@@ -280,6 +280,59 @@ if [ "$RSYNC_EXIT" -ne 0 ] && [[ ! -d "$BACKUP_VOLUME" ]]; then
     exit 31
 fi
 
+# Pfad aus einer rsync-Fehlermeldung (ohne "rsync(PID): error: "), relativ
+# zum User-Ordner. Lesefehler nennen den vollen Quellpfad, Schreibfehler den
+# relativen; temporäre Dateien ".name.XXXXXXXXXX" werden zurückgeführt.
+path_from_error() {
+    local msg="$1" cand dir base
+    if [[ "$msg" =~ "^[a-z_]+: '(.+)': " ]]; then
+        cand="${match[1]}"
+    elif [[ "$msg" =~ "^(.+): [a-z_]+" ]]; then
+        cand="${match[1]%%: *}"
+    else
+        return 1
+    fi
+    cand="${cand#$USER_FOLDER/}"
+    dir="${cand:h}"; base="${cand:t}"
+    if [[ "$base" =~ '^\.(.+)\.[A-Za-z0-9]{10}$' ]]; then
+        base="${match[1]}"
+        [[ "$dir" == "$cand" || "$dir" == "." ]] && cand="$base" || cand="$dir/$base"
+    fi
+    print -r -- "${cand#./}"
+}
+
+# Dateien, die in den Fehlern vorkommen und im Backup nicht dem Original
+# entsprechen (fehlt, alt oder nicht lesbar), wurden nicht gesichert.
+# Inhalt vergleichen: openrsync setzt die Zeit auch auf nicht ersetzte Dateien.
+unsaved_files_from_log() {
+    local line cand
+    local -A seen
+    while IFS= read -r line; do
+        cand=$(path_from_error "${line#rsync\([0-9]*\): error: }") || continue
+        [[ -z "$cand" || -n "${seen[$cand]}" ]] && continue
+        seen[$cand]=1
+        [[ -f "$USER_FOLDER/$cand" && ! -L "$USER_FOLDER/$cand" ]] || continue
+        cmp -s "$USER_FOLDER/$cand" "$TARGET/$cand" 2>/dev/null || print -r -- "$cand"
+    done < <(LC_ALL=C grep -E '^rsync\([0-9]+\): error: .*(Operation not permitted|Permission denied)' "$ERROR_LOG")
+}
+
+if [[ -z "$DRY_RUN_FLAG" && ( "$RSYNC_EXIT" -eq 23 || "$RSYNC_EXIT" -eq 24 ) ]]; then
+    SKIPPED_ITEMS=("${(@f)$(unsaved_files_from_log)}")
+    SKIPPED_ITEMS=(${SKIPPED_ITEMS:#})
+    if [ ${#SKIPPED_ITEMS[@]} -gt 0 ]; then
+        # Mit Größe: nicht lesbare Dateien fehlen in der Vorab-Scan-Liste,
+        # Swift kennt ihre Größe sonst nicht.
+        for item in "${SKIPPED_ITEMS[@]}"; do
+            echo "BACKUP_SKIPPED=$(stat -f %z "$USER_FOLDER/$item" 2>/dev/null || echo 0) $item" >&2
+        done
+        echo "⚠️ ${#SKIPPED_ITEMS[@]} item(s) could not be backed up because macOS did not allow access:"
+        for item in "${SKIPPED_ITEMS[@]:0:20}"; do
+            echo "⚠️   $item"
+        done
+        [ ${#SKIPPED_ITEMS[@]} -gt 20 ] && echo "⚠️   and $(( ${#SKIPPED_ITEMS[@]} - 20 )) more, see $ERROR_LOG"
+    fi
+fi
+
 if [[ -n "$DRY_RUN_FLAG" ]]; then
   :
 elif [ "$RSYNC_EXIT" -eq 0 ]; then

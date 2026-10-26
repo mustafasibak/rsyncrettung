@@ -161,6 +161,11 @@ struct ContentView: View {
     @State private var xferSizeMapLoaded = false
     @State private var backupUncreditedFiles: [String] = []
     @State private var backupPendingFile: String? = nil
+    @State private var backupCreditedSizes: [String: Int64] = [:]
+    @State private var backupSkippedPaths: [String] = []
+    @State private var backupSkippedSizes: [String: Int64] = [:]
+    @State private var backupSkippedKB: Int64 = 0
+    @State private var backupSkippedOutsideKB: Int64 = 0
     @State private var backupRealDoneBytes: Int64 = 0
     @State private var baselineTargetKB: Int64 = 0
     @State private var backupStartTime: Date? = nil
@@ -213,13 +218,16 @@ struct ContentView: View {
     @State private var displayedRestoreETA: Double? = nil
 
     // MARK: - Finish State
+    @State private var finishingTab: AppTab? = nil
     @State private var backupFinishState: FinishState? = nil
     @State private var restoreFinishState: FinishState? = nil
 
     // MARK: - Computed
 
+    // While a run is finishing (Cancel already re-enabled the tab picker) its
+    // messages must still land in that run's log, not the visible tab's.
     func appendLog(_ message: String, type: LogType = .info) {
-        if activeTab == .backup {
+        if (finishingTab ?? activeTab) == .backup {
             backupLogEntries.append(LogEntry(message: message, type: type))
         } else {
             restoreLogEntries.append(LogEntry(message: message, type: type))
@@ -231,7 +239,7 @@ struct ContentView: View {
     // line appears), with the du delta covering the in-flight file's bytes.
     var effectiveBackupDoneKB: Int64 {
         let duDelta = max(0, copiedKB - baselineTargetKB)
-        let done = max(duDelta, backupRealDoneBytes / 1024)
+        let done = max(duDelta, backupRealDoneBytes / 1024 + backupSkippedKB)
         return max(backupDoneFloorKB, xferTotalKB > 0 ? min(xferTotalKB, done) : done)
     }
 
@@ -245,7 +253,7 @@ struct ContentView: View {
     // it starts pre-filled with what's already on the drive (totalKB − xferTotalKB)
     // and only the new/changed data grows from there.
     var backupPreExistingKB: Int64 {
-        xferTotalKB > 0 ? max(0, totalKB - xferTotalKB) : 0
+        xferTotalKB > 0 ? max(0, totalKB - xferTotalKB - backupSkippedOutsideKB) : 0
     }
 
     var backupPreFraction: Double {
@@ -255,7 +263,7 @@ struct ContentView: View {
 
     var progress: Double {
         if xferTotalKB > 0, totalKB > 0 {
-            let done = min(totalKB, backupPreExistingKB + effectiveBackupDoneKB)
+            let done = min(totalKB, backupPreExistingKB + effectiveBackupDoneKB + backupSkippedOutsideKB)
             return Double(done) / Double(totalKB)
         }
         guard totalKB > 0 else { return 0 }
@@ -290,8 +298,11 @@ struct ContentView: View {
 
     var backupGBLine: String {
         if xferTotalKB > 0 {
-            let done = min(totalKB, backupPreExistingKB + effectiveBackupDoneKB)
-            return "\(gbString(fromKB: done)) / \(gbString(fromKB: totalKB))  ·  new/changed: \(sizeString(fromKB: effectiveBackupDoneKB, scaleKB: xferTotalKB)) / \(sizeString(fromKB: xferTotalKB, scaleKB: xferTotalKB))"
+            let skipped = backupSkippedKB + backupSkippedOutsideKB
+            let done = min(totalKB, backupPreExistingKB + effectiveBackupDoneKB) - backupSkippedKB
+            let size = { (kb: Int64) in self.sizeString(fromKB: max(0, kb), scaleKB: max(self.xferTotalKB, skipped)) }
+            let line = "\(gbString(fromKB: max(0, done))) / \(gbString(fromKB: max(0, totalKB - skipped)))  ·  new/changed: \(size(effectiveBackupDoneKB - backupSkippedKB)) / \(size(xferTotalKB - backupSkippedKB))"
+            return skipped > 0 ? line + "  ·  skipped: \(size(skipped))" : line
         }
         return "\(gbString(fromKB: copiedKB)) / \(gbString(fromKB: totalKB))"
     }
@@ -363,7 +374,7 @@ struct ContentView: View {
                     .padding(8)
             }
             .frame(maxWidth: .infinity)
-            .frame(height: activeTab == .backup ? 260 : 200)
+            .frame(minHeight: activeTab == .backup ? 200 : 140, maxHeight: .infinity)
             .background(Color.gray.opacity(0.1))
             .cornerRadius(8)
 
@@ -403,7 +414,10 @@ struct ContentView: View {
             }
         }
         .padding(20)
-        .frame(width: 640, height: 820)
+        // No fixed minimum height: the window's minimum follows the content, so
+        // a finished run's extra lines grow the window instead of pushing the
+        // title and the bottom controls past its edges.
+        .frame(minWidth: 640, maxWidth: .infinity, maxHeight: .infinity)
 
         // CLOUD WARNING
         .sheet(isPresented: $showCloudWarning, onDismiss: { cloudWarningAcknowledged = false }) {
@@ -415,6 +429,7 @@ struct ContentView: View {
                     .foregroundColor(.secondary)
                 Toggle(isOn: $cloudWarningAcknowledged) {
                     Text("I have logged myself out of all cloud services")
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .toggleStyle(.checkbox)
                 Spacer()
@@ -430,7 +445,8 @@ struct ContentView: View {
                 }
             }
             .padding(24)
-            .frame(width: 420, height: 240)
+            .frame(width: 420)
+            .frame(minHeight: 240)
         }
 
         // UNENCRYPTED DRIVE WARNING
@@ -451,6 +467,7 @@ struct ContentView: View {
                     .foregroundColor(.secondary)
                 Toggle(isOn: $unencryptedWarningAcknowledged) {
                     Text("I understand anyone with this drive can read the backup")
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .toggleStyle(.checkbox)
                 Spacer()
@@ -467,7 +484,8 @@ struct ContentView: View {
                 }
             }
             .padding(24)
-            .frame(width: 460, height: 320)
+            .frame(width: 460)
+            .frame(minHeight: 320)
         }
 
         // FULL DISK ACCESS WARNING
@@ -481,6 +499,7 @@ struct ContentView: View {
                 if fdaPendingIsDryRun {
                     Toggle(isOn: $fdaWarningAcknowledged) {
                         Text("Run the dry run anyway (results will be incomplete)")
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     .toggleStyle(.checkbox)
                 }
@@ -509,7 +528,8 @@ struct ContentView: View {
                 }
             }
             .padding(28)
-            .frame(width: 500, height: 340)
+            .frame(width: 500)
+            .frame(minHeight: 340)
         }
 
         // ADVANCED SETTINGS
@@ -520,6 +540,7 @@ struct ContentView: View {
                     VStack(alignment: .leading) {
                         Text("Mirror Backup (--delete)")
                         Text("Deletes files on target that no longer exist on source")
+                            .fixedSize(horizontal: false, vertical: true)
                             .font(.caption).foregroundColor(.secondary)
                     }
                 }
@@ -530,6 +551,7 @@ struct ContentView: View {
                     VStack(alignment: .leading) {
                         Text("Include Trash")
                         Text("Include user's Trash folder in backup")
+                            .fixedSize(horizontal: false, vertical: true)
                             .font(.caption).foregroundColor(.secondary)
                     }
                 }
@@ -537,6 +559,7 @@ struct ContentView: View {
                     VStack(alignment: .leading) {
                         Text("Dry Run (--dry-run)")
                         Text("Preview what would be transferred without copying any files")
+                            .fixedSize(horizontal: false, vertical: true)
                             .font(.caption).foregroundColor(.secondary)
                     }
                 }
@@ -544,7 +567,8 @@ struct ContentView: View {
                 Button("Close") { showAdvancedSettings = false }
             }
             .padding(24)
-            .frame(width: 400, height: 320)
+            .frame(width: 400)
+            .frame(minHeight: 320)
         }
 
         // MIRROR WARNING
@@ -557,6 +581,7 @@ struct ContentView: View {
                     .foregroundColor(.secondary)
                 Toggle(isOn: $mirrorWarningAcknowledged) {
                     Text("I understand that files may be permanently deleted from the backup drive")
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .toggleStyle(.checkbox)
                 Spacer()
@@ -574,7 +599,8 @@ struct ContentView: View {
                 }
             }
             .padding(24)
-            .frame(width: 420, height: 260)
+            .frame(width: 420)
+            .frame(minHeight: 260)
         }
 
         // RESTORE MIRROR WARNING
@@ -587,6 +613,7 @@ struct ContentView: View {
                     .foregroundColor(.secondary)
                 Toggle(isOn: $restoreMirrorWarningAcknowledged) {
                     Text("I understand that files may be permanently deleted from my home folder")
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .toggleStyle(.checkbox)
                 Spacer()
@@ -605,7 +632,8 @@ struct ContentView: View {
                 }
             }
             .padding(24)
-            .frame(width: 420, height: 280)
+            .frame(width: 420)
+            .frame(minHeight: 280)
         }
 
         // RESTORE ONTO A MAC IN USE
@@ -618,6 +646,7 @@ struct ContentView: View {
                     .foregroundColor(.secondary)
                 Toggle(isOn: $restoreInUseAcknowledged) {
                     Text("I understand newer files on this Mac may be overwritten")
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .toggleStyle(.checkbox)
                 Spacer()
@@ -639,7 +668,8 @@ struct ContentView: View {
                 }
             }
             .padding(24)
-            .frame(width: 460, height: 320)
+            .frame(width: 460)
+            .frame(minHeight: 320)
         }
 
         // Quitting would otherwise leave the script and rsync running with no
@@ -713,7 +743,7 @@ struct ContentView: View {
 
         Picker("Select Backup Folder:", selection: $selectedBackupFolder) {
             if backupFolders.isEmpty {
-                Text("No folders found on drive").tag("")
+                Text("").tag("")
             } else {
                 ForEach(backupFolders, id: \.self) { Text($0).tag($0) }
             }
@@ -814,12 +844,13 @@ struct ContentView: View {
             finishBanner(state: state, dryRun: dryRunMode)
             if !dryRunMode {
                 HStack(spacing: 10) {
-                    SegmentedProgressBar(preFraction: backupPreFraction, totalFraction: progress).frame(maxWidth: 260)
-                    Text("\(Int((progress * 100).rounded()))%").font(.system(.footnote, design: .monospaced))
+                    SegmentedProgressBar(preFraction: backupPreFraction, totalFraction: progress, skippedFraction: backupSkippedFraction).frame(maxWidth: 260)
+                    Text(backupPercentLabel).font(.system(.footnote, design: .monospaced))
                 }
                 Text(backupGBLine)
                     .font(.system(.footnote, design: .monospaced))
                     .foregroundStyle(.secondary)
+                skippedList(backupSkippedPaths, reason: "macOS did not allow access")
             }
         } else if isScanning && isRunning {
             HStack(spacing: 10) {
@@ -839,11 +870,11 @@ struct ContentView: View {
                     .font(.system(.footnote, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
-        } else {
+        } else if isRunning {
             HStack(spacing: 10) {
-                SegmentedProgressBar(preFraction: backupPreFraction, totalFraction: progress)
+                SegmentedProgressBar(preFraction: backupPreFraction, totalFraction: progress, skippedFraction: backupSkippedFraction)
                     .frame(maxWidth: 260)
-                Text("\(Int((progress * 100).rounded()))%")
+                Text(backupPercentLabel)
                     .font(.system(.footnote, design: .monospaced))
                 Text("Speed: \(speedString(fromKBps: speedKBps))")
                     .font(.system(.footnote, design: .monospaced))
@@ -852,9 +883,12 @@ struct ContentView: View {
             Text(backupGBLine)
                 .font(.system(.footnote, design: .monospaced))
                 .foregroundStyle(.secondary)
+            skippedList(backupSkippedPaths, reason: "macOS did not allow access")
             Text(etaString)
                 .font(.system(.footnote, design: .monospaced))
                 .foregroundStyle(.secondary)
+        } else {
+            HStack { }.frame(height: 20)
         }
     }
 
@@ -866,20 +900,30 @@ struct ContentView: View {
         return "\(Int((written * 100).rounded(.down)))% restored"
     }
 
+    var backupSkippedFraction: Double {
+        xferTotalKB > 0 && totalKB > 0 ? Double(backupSkippedKB + backupSkippedOutsideKB) / Double(totalKB) : 0
+    }
+
+    var backupPercentLabel: String {
+        let written = max(0, progress - backupSkippedFraction)
+        guard backupSkippedKB + backupSkippedOutsideKB > 0 else { return "\(Int((written * 100).rounded()))%" }
+        return "\(Int((written * 100).rounded(.down)))% backed up"
+    }
+
     var restoreSkippedFraction: Double {
         restoreXferTotalKB > 0 ? Double(restoreSkippedKB) / Double(restoreXferTotalKB) : 0
     }
 
     @ViewBuilder
-    var restoreSkippedList: some View {
-        if !restoreSkippedPaths.isEmpty {
+    func skippedList(_ paths: [String], reason: String) -> some View {
+        if !paths.isEmpty {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Skipped, macOS did not allow writing (\(restoreSkippedPaths.count)):")
-                ForEach(restoreSkippedPaths.prefix(3), id: \.self) { path in
+                Text("Skipped, \(reason) (\(paths.count)):")
+                ForEach(paths.prefix(3), id: \.self) { path in
                     Text("  \(path)").lineLimit(1).truncationMode(.middle)
                 }
-                if restoreSkippedPaths.count > 3 {
-                    Text("  and \(restoreSkippedPaths.count - 3) more, see the log above")
+                if paths.count > 3 {
+                    Text("  and \(paths.count - 3) more, see the log above")
                 }
             }
             .font(.system(.footnote, design: .monospaced))
@@ -899,7 +943,7 @@ struct ContentView: View {
                 Text(restoreGBLine)
                     .font(.system(.footnote, design: .monospaced))
                     .foregroundStyle(.secondary)
-                restoreSkippedList
+                skippedList(restoreSkippedPaths, reason: "macOS did not allow writing")
             }
         } else if isScanning && isRunning {
             HStack(spacing: 10) {
@@ -932,7 +976,7 @@ struct ContentView: View {
             Text(restoreGBLine)
                 .font(.system(.footnote, design: .monospaced))
                 .foregroundStyle(.secondary)
-            restoreSkippedList
+            skippedList(restoreSkippedPaths, reason: "macOS did not allow writing")
             Text(restoreETAString)
                 .font(.system(.footnote, design: .monospaced))
                 .foregroundStyle(.secondary)
@@ -1085,6 +1129,11 @@ struct ContentView: View {
         xferSizeMapLoaded = false
         backupUncreditedFiles = []
         backupPendingFile = nil
+        backupCreditedSizes = [:]
+        backupSkippedPaths = []
+        backupSkippedSizes = [:]
+        backupSkippedKB = 0
+        backupSkippedOutsideKB = 0
         backupRealDoneBytes = 0
         baselineTargetKB = 0
         backupStartTime = nil
@@ -1179,9 +1228,10 @@ struct ContentView: View {
                         line != "SCAN_START" &&
                         line != "SCAN_END" &&
                         !line.hasPrefix("RUNNING_AS=") &&
-                        !line.hasPrefix("PWD=")
+                        !line.hasPrefix("PWD=") &&
+                        !line.hasPrefix("BACKUP_SKIPPED=")
                     }
-                    .map { LogEntry(message: $0, type: .info) }
+                    .map { LogEntry(message: $0, type: $0.hasPrefix("⚠️") ? .warning : .info) }
                 var fileLines: [String] = []
                 if !isDryRun {
                     for line in lines {
@@ -1205,6 +1255,8 @@ struct ContentView: View {
                 // Pipe EOF — clearing the handler prevents a retain cycle.
                 handle.readabilityHandler = nil
                 group.notify(queue: .main) {
+                    self.finishingTab = .backup
+                    defer { self.finishingTab = nil }
                     self.isRunning = false
                     self.stopProgressTimer()
                     self.flushAndStopLogTimer()
@@ -1570,6 +1622,8 @@ struct ContentView: View {
                 // calls, dict merges) to finish updating main-thread state, THEN
                 // run the completion / summary logic.
                 group.notify(queue: .main) {
+                    self.finishingTab = .restore
+                    defer { self.finishingTab = nil }
                     self.isRunning = false
                     self.refreshMacFreeSpace()
                     self.stopRestoreProgressTimer()
@@ -1721,8 +1775,12 @@ struct ContentView: View {
                     self.xferSizeByPath = map
                     self.xferSizeMapLoaded = true
                     for p in self.backupUncreditedFiles {
-                        if let b = self.xferSizeByPath.removeValue(forKey: p) { self.backupRealDoneBytes += b }
+                        if let b = self.xferSizeByPath.removeValue(forKey: p) {
+                            self.backupRealDoneBytes += b
+                            self.backupCreditedSizes[p] = b
+                        }
                     }
+                    for p in self.backupSkippedPaths { self.dropSkippedBackupPath(p) }
                     self.backupUncreditedFiles = []
                 } else {
                     self.restoreXferSizeByPath = map
@@ -1748,6 +1806,7 @@ struct ContentView: View {
             if let prev = backupPendingFile {
                 if let b = xferSizeByPath.removeValue(forKey: prev) {
                     backupRealDoneBytes += b
+                    backupCreditedSizes[prev] = b
                 } else if !xferSizeMapLoaded {
                     backupUncreditedFiles.append(prev)
                 }
@@ -1778,14 +1837,43 @@ struct ContentView: View {
         }
     }
 
+    // Backup counterpart of dropSkippedRestorePath: a file the script reports
+    // as not backed up moves from the size map or credited bytes into
+    // backupSkippedKB (orange part of the bar). Unreadable files never made it
+    // into the pre-scan list and so sat in the "already on the drive" part:
+    // their size (sent along by the script) moves to backupSkippedOutsideKB.
+    func dropSkippedBackupPath(_ skipped: String) {
+        let target = pathMatchKey(skipped)
+        backupDoneFloorKB = max(backupDoneFloorKB, effectiveBackupDoneKB)
+        var found = false
+        var removedKB: Int64 = 0
+        for key in xferSizeByPath.keys where pathMatchKey(key) == target {
+            removedKB += (xferSizeByPath.removeValue(forKey: key) ?? 0) / 1024
+            found = true
+        }
+        var creditedBytes: Int64 = 0
+        for key in backupCreditedSizes.keys where pathMatchKey(key) == target {
+            creditedBytes += backupCreditedSizes.removeValue(forKey: key) ?? 0
+            found = true
+        }
+        backupRealDoneBytes -= creditedBytes
+        backupSkippedKB += removedKB + creditedBytes / 1024
+        if !found {
+            backupSkippedOutsideKB += (backupSkippedSizes[skipped] ?? 0) / 1024
+        }
+        backupUncreditedFiles.removeAll { pathMatchKey($0) == target }
+        if let pending = backupPendingFile, pathMatchKey(pending) == target { backupPendingFile = nil }
+        lastEffectiveBackupDoneKB = effectiveBackupDoneKB
+    }
+
     // A path the script skipped (macOS refused the write) counts as dealt
     // with: its bytes move from credited/pending into restoreSkippedKB, so the
     // bar never moves back and reaches 100 % when the last real file is done.
     func dropSkippedRestorePath(_ skipped: String) {
-        let target = restorePathMatchKey(skipped)
+        let target = pathMatchKey(skipped)
         restoreDoneFloorKB = max(restoreDoneFloorKB, effectiveRestoreDoneKB)
         func isUnder(_ p: String) -> Bool {
-            let key = restorePathMatchKey(p)
+            let key = pathMatchKey(p)
             return key == target || (target.hasSuffix("/") && key.hasPrefix(target))
         }
         var removedKB: Int64 = 0
@@ -1806,7 +1894,7 @@ struct ContentView: View {
     // The skip sentinel carries the real UTF-8 name, rsync's file lines the
     // escaped form ("Ö" shows as a raw byte plus "\#226"): collapse every run
     // of non-ASCII characters and \#ooo escapes to one "?" on both sides.
-    func restorePathMatchKey(_ path: String) -> String {
+    func pathMatchKey(_ path: String) -> String {
         guard path.unicodeScalars.contains(where: { !$0.isASCII || $0 == "\\" }) else { return path }
         let scalars = Array(path.unicodeScalars)
         var out = String.UnicodeScalarView()
@@ -1849,6 +1937,14 @@ struct ContentView: View {
                         }
                     }
                 }
+            }
+            if line.hasPrefix("BACKUP_SKIPPED="), activeTab == .backup {
+                let value = line.dropFirst("BACKUP_SKIPPED=".count)
+                guard let sp = value.firstIndex(of: " ") else { continue }
+                let skipped = String(value[value.index(after: sp)...])
+                backupSkippedSizes[skipped] = Int64(value[..<sp]) ?? 0
+                backupSkippedPaths.append(skipped)
+                if xferSizeMapLoaded { dropSkippedBackupPath(skipped) }
             }
             if line.hasPrefix("RESTORE_SKIPPED="), activeTab == .restore {
                 let skipped = String(line.dropFirst("RESTORE_SKIPPED=".count))
